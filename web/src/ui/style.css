@@ -55,6 +55,17 @@ main {
   opacity: 0.9;
   min-height: 1.2em;
 }
+.render {
+  display: grid;
+  gap: 8px;
+}
+.render button {
+  font: inherit;
+  padding: 8px 12px;
+}
+.render progress {
+  width: 100%;
+}
 .advanced summary {
   cursor: pointer;
   font-weight: 600;

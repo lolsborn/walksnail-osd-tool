@@ -2,6 +2,8 @@
 // The preview decodes with a plain <video> element so it works in every browser; the render
 // pipeline (WebCodecs) comes in milestone 2.
 
+import { canPickSaveLocation, openDownloadSink, openFileSink } from "./codec/output";
+import { DEFAULT_RENDER_SETTINGS, Renderer, webCodecsAvailable } from "./codec/render";
 import { DEFAULT_OSD_OPTIONS, drawOsd, drawSrt, type OsdOptions } from "./compositor/canvas2d";
 import { characterSizeForVideoHeight, loadFontFile, resizeFont, type FontFile } from "./parsers/font";
 import { osdFrameIndexAt, parseOsdFile, type OsdFile } from "./parsers/osd";
@@ -58,6 +60,7 @@ function updateInfo(): void {
   if (state.videoFile && !state.osd) lines.push("No .osd file selected yet.");
   info.textContent = lines.join("\n");
   srtOptionsPanel.hidden = !state.srt;
+  updateRenderButton();
 }
 
 function playbackSpeedFactor(): number {
@@ -227,4 +230,70 @@ bindCheckbox("srt-latency", (v) => (state.srtOptions.showLatency = v));
 bindCheckbox("srt-bitrate", (v) => (state.srtOptions.showBitrate = v));
 bindCheckbox("srt-distance", (v) => (state.srtOptions.showDistance = v));
 
-void Promise.all([initFonts(), document.fonts.load("35px AzeretMono")]).then(() => void drawPreview());
+// --- Rendering ---
+
+const renderButton = el<HTMLButtonElement>("render");
+const cancelButton = el<HTMLButtonElement>("cancel");
+const progressBar = el<HTMLProgressElement>("progress");
+const renderStatus = el<HTMLDivElement>("render-status");
+let renderer: Renderer | undefined;
+
+function updateRenderButton(): void {
+  const ready = Boolean(state.videoFile && state.osd && state.font) && !renderer;
+  renderButton.disabled = !ready;
+  if (!webCodecsAvailable()) {
+    renderButton.disabled = true;
+    renderStatus.textContent = "This browser cannot render: it lacks WebCodecs. The preview still works.";
+  }
+}
+
+async function startRender(): Promise<void> {
+  if (!state.videoFile || !state.osd) return;
+  const font = await ensureSizedFont();
+  if (!font) return;
+  const outputName = state.videoFile.name.replace(/\.mp4$/i, "") + "_with_osd.mp4";
+  const sink = canPickSaveLocation() ? await openFileSink(outputName) : openDownloadSink(outputName);
+  if (!sink) return; // cancelled the file picker
+
+  renderer = new Renderer();
+  updateRenderButton();
+  cancelButton.hidden = false;
+  progressBar.hidden = false;
+  progressBar.value = 0;
+  renderStatus.textContent = "Starting...";
+  try {
+    await renderer.run(
+      {
+        video: state.videoFile,
+        osd: state.osd,
+        srt: state.srt,
+        font,
+        osdOptions: state.osdOptions,
+        srtOptions: state.srtOptions,
+        sink,
+      },
+      DEFAULT_RENDER_SETTINGS,
+      (p) => {
+        progressBar.value = p.frameCount ? p.framesDone / p.frameCount : 0;
+        const remaining = p.fps > 0 ? (p.frameCount - p.framesDone) / p.fps : 0;
+        renderStatus.textContent = `${p.framesDone} / ${p.frameCount} frames, ${p.fps.toFixed(0)} fps, ${formatTime(remaining)} left`;
+      },
+    );
+    renderStatus.textContent = `Done: ${outputName}`;
+    progressBar.value = 1;
+  } catch (err) {
+    renderStatus.textContent = (err as Error).message;
+  } finally {
+    renderer = undefined;
+    cancelButton.hidden = true;
+    updateRenderButton();
+  }
+}
+
+renderButton.addEventListener("click", () => void startRender());
+cancelButton.addEventListener("click", () => renderer?.cancel());
+
+void Promise.all([initFonts(), document.fonts.load("35px AzeretMono")]).then(() => {
+  updateRenderButton();
+  void drawPreview();
+});

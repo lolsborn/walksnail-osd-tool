@@ -28,7 +28,10 @@ export const DEFAULT_OSD_OPTIONS: OsdOptions = {
 export const SRT_TEXT_COLOR = "rgb(240, 240, 240)";
 export const SRT_FONT_FAMILY = "AzeretMono";
 
-export function drawOsd(ctx: CanvasRenderingContext2D, frame: OsdFrame, font: FontFile, options: OsdOptions): void {
+/** Either kind of 2D context: the visible preview canvas or an offscreen render canvas. */
+export type Canvas2D = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+
+export function drawOsd(ctx: Canvas2D, frame: OsdFrame, font: FontFile, options: OsdOptions): void {
   const { width, height } = CHARACTER_SIZES[font.size];
   for (const glyph of frame.glyphs) {
     if (options.masked.size > 0 && options.masked.has(`${glyph.x},${glyph.y}`)) continue;
@@ -48,7 +51,7 @@ export function srtLayout(options: SrtOptions, width: number, height: number): {
 }
 
 export function drawSrt(
-  ctx: CanvasRenderingContext2D,
+  ctx: Canvas2D,
   data: SrtFrameData,
   options: SrtOptions,
   width: number,
