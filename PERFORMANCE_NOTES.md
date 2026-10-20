@@ -230,6 +230,7 @@ side). Decoder and compositor are mostly idle. Next lever is what crosses that
 pipe: fewer bytes (NV12 is 2.7x smaller than RGBA) and no swscale on the encoder
 side, i.e. stage 3's format work, or removing the pipe entirely (stage 4).
 
+| 1b    | Frame buffers 4 -> 8, h264_videotoolbox | 160.6 | 2.68x | Longer clip (18060 frames, 112.5 s). Writer idle 11% -> 3.6%, write 6.0 ms/frame |
 | 2     | GPU composite, CPU round trip (infrastructure, parity test) |     |       |       |
 | 2b    | GPU frames in flight                 |     |       |       |
 | 3     | YUV pipes + hwaccel decode           |     |       |       |

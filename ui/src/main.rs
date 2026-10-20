@@ -13,6 +13,7 @@ use poll_promise::Promise;
 use crate::util::check_updates;
 
 mod app;
+mod bench;
 mod bottom_panel;
 mod central_panel;
 mod osd_preview;
@@ -22,6 +23,16 @@ mod top_panel;
 mod util;
 
 fn main() -> Result<(), eframe::Error> {
+    // Headless benchmark mode, see `bench.rs`
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--bench") {
+        if let Err(e) = bench::run(&args) {
+            eprintln!("BENCH error: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let _guard = util::init_tracing();
 
     use util::build_info;

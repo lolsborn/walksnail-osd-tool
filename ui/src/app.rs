@@ -73,6 +73,7 @@ impl WalksnailOsdTool {
 
         let srt_options = saved_settings.srt_options;
         let osd_options = saved_settings.osd_options;
+        let render_settings = restore_render_settings(saved_settings.render_options, &encoders);
 
         // Load last used font file
         let font_path = PathBuf::from(saved_settings.font_path);
@@ -93,6 +94,7 @@ impl WalksnailOsdTool {
             srt_font: Some(srt_font),
             osd_options,
             srt_options,
+            render_settings,
             font_file,
             app_update,
             app_version,
@@ -100,6 +102,29 @@ impl WalksnailOsdTool {
             ..Default::default()
         }
     }
+}
+
+/// Re-select the saved encoder by name in the list of encoders detected on this machine, so the
+/// dropdown index and the encoder's `extra_args` match the current installation. Falls back to the
+/// first selectable encoder if the saved one is not available.
+fn restore_render_settings(mut settings: RenderSettings, encoders: &[Encoder]) -> RenderSettings {
+    let selectable: Vec<&Encoder> = encoders
+        .iter()
+        .filter(|e| settings.show_undetected_encoders || e.detected)
+        .collect();
+    match selectable.iter().position(|e| e.name == settings.encoder.name) {
+        Some(idx) => {
+            settings.selected_encoder_idx = idx;
+            settings.encoder = selectable[idx].clone();
+        }
+        None => {
+            if let Some(first) = selectable.first() {
+                settings.selected_encoder_idx = 0;
+                settings.encoder = (*first).clone();
+            }
+        }
+    }
+    settings
 }
 
 #[derive(Default)]

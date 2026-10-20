@@ -15,14 +15,26 @@ pub struct RenderSettings {
 
 impl Default for RenderSettings {
     fn default() -> Self {
+        // Hardware H.264 on macOS, software elsewhere. On startup the app re-selects the encoder by
+        // name from the list of detected encoders and falls back to the first one if it's missing.
+        #[cfg(target_os = "macos")]
+        let encoder = Encoder {
+            name: "h264_videotoolbox".to_string(),
+            codec: Codec::H264,
+            hardware: true,
+            detected: false,
+            extra_args: Vec::new(),
+        };
+        #[cfg(not(target_os = "macos"))]
+        let encoder = Encoder {
+            name: "libx264".to_string(),
+            codec: Codec::H264,
+            hardware: false,
+            detected: false,
+            extra_args: Vec::new(),
+        };
         Self {
-            encoder: Encoder {
-                name: "libx264".to_string(),
-                codec: Codec::H264,
-                hardware: false,
-                detected: false,
-                extra_args: Vec::new(),
-            },
+            encoder,
             selected_encoder_idx: 0,
             show_undetected_encoders: false,
             bitrate_mbps: 40,
