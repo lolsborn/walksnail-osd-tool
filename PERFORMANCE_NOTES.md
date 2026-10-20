@@ -68,12 +68,55 @@ Conclusions:
   overlapping. Decoupling them with threads and a few frames of buffering should
   bring per-frame time toward max(stage) ~ 5 ms (~190 fps) with no GPU work.
 
+### Decode -> encode chains with real frames (2000 frames, 1080p)
+
+| Test                                          | fps   |
+|-----------------------------------------------|-------|
+| dec -> rgba over pipe -> h264_videotoolbox    | 206   |
+| dec -> nv12 over pipe -> h264_videotoolbox    | 208   |
+| dec -> rgba over pipe -> hevc_videotoolbox    | 195   |
+| dec -> nv12 over pipe -> hevc_videotoolbox    | 196   |
+| dec -> h264_videotoolbox in ONE ffmpeg, no pipe | 207 |
+| hwaccel dec -> h264_videotoolbox, one ffmpeg  | 203   |
+
+ffmpeg's VideoToolbox encoder path caps at ~207 fps at 1080p regardless of pipe,
+pixel format or decoder. That is the ceiling of any design that encodes through
+ffmpeg. Stage 1 (155.5) is at 75% of it. NV12 pipes (old stage 3) would not help
+at 1080p; they only matter at 4K where bytes per frame are 4x larger. Beating 207
+needs in-process VideoToolbox encoding (stage 4), for which the GPU compositor is
+the prerequisite.
+
+
+Goal: decode -> composite -> encode with frames staying on the GPU. Each stage
+below is a separate branch/PR, keeps the app working end to end, and gets a row
+in the results table. wgpu 0.20.1 is already in the lock file via eframe, so the
+backend crate pins that same version to avoid a second copy.
+
+### VideoToolbox encoder flags (nv12 chain, real frames, 2000 frames, 1080p)
+
+| Encoder / flags                         | fps   |
+|-----------------------------------------|-------|
+| h264_videotoolbox default               | 207   |
+| h264_videotoolbox -prio_speed 1         | 207   |
+| h264_videotoolbox -realtime 1           | 158   |
+| h264_videotoolbox no B-frames           | 207   |
+| h264_videotoolbox baseline profile      | 207   |
+| hevc_videotoolbox default               | 196   |
+| hevc_videotoolbox -prio_speed 1         | 321   |
+
+h264 is capped by the encoder path itself. hevc with `-prio_speed 1` is 1.6x faster
+than anything else through ffmpeg, so it is now added to the hevc_videotoolbox
+encoder's extra args and is the encoder to measure with from here on.
+
 ## Direction: full wgpu render pipeline, built incrementally
 
 Goal: decode -> composite -> encode with frames staying on the GPU. Each stage
 below is a separate branch/PR, keeps the app working end to end, and gets a row
 in the results table. wgpu 0.20.1 is already in the lock file via eframe, so the
 backend crate pins that same version to avoid a second copy.
+
+Stage order was revised after stage 0's measurements: pipelined I/O moved ahead
+of the GPU compositor because the overlay was <10% of frame time.
 
 ### Stage 0: measure and fix the obvious CPU waste (no GPU yet)
 

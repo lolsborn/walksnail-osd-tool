@@ -22,7 +22,7 @@ use crate::{
 
 /// Number of frames that may be buffered between each pair of pipeline stages. Each frame is
 /// width * height * 4 bytes (8 MB at 1080p, 33 MB at 4K), so keep this small.
-const FRAME_BUFFER_LEN: usize = 4;
+const FRAME_BUFFER_LEN: usize = 8;
 
 #[tracing::instrument(skip(osd_frames, srt_frames, font_file), err)]
 pub fn start_video_render(

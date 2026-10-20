@@ -84,8 +84,11 @@ impl Encoder {
 
             #[cfg(target_os = "macos")]
             Encoder::new_with_extra_args(
-                "hevc_videotoolbox", Codec::H265, true, 
-                &["-tag:v", "hvc1"] // Apple QuickTime player on Mac only supports hvc1
+                "hevc_videotoolbox", Codec::H265, true,
+                &[
+                    "-tag:v", "hvc1", // Apple QuickTime player on Mac only supports hvc1
+                    "-prio_speed", "1", // ~1.6x faster encoding at 1080p, see PERFORMANCE_NOTES.md
+                ]
             ),
         ];
 
