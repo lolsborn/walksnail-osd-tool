@@ -14,9 +14,12 @@ Hard constraints:
   telemetry. The app is a static site that works with the network disconnected.
 - **Full length renders.** A 1080p60 DVR of 4 minutes is 1.4 GB in and 1 GB out;
   neither may be held in memory. Everything streams.
-- **Hardware codecs.** Decode and encode must use the platform's media engine, like the
-  native tool does through VideoToolbox. Software paths are fallbacks only.
+- **Compatibility over speed.** Work in every current desktop browser with as few
+  optional APIs as possible. Hardware codecs through WebCodecs are preferred when
+  present, but a slower path is acceptable; a failed render is not.
 - **Pixel parity** with the native renderer so users can switch between the two.
+- **Simple UI.** One picker for the flight files, a dropdown of fonts shipped with the
+  app, sensible fixed render settings, and everything else behind an Advanced section.
 
 Non-goals for v1: mobile browsers, editing features beyond what the native app has,
 browser extensions.
@@ -35,10 +38,11 @@ browser extensions.
 | Audio | Demux with mp4box.js, remux unchanged | The native tool currently drops audio; the browser version should pass it through. |
 | Parsers | TypeScript ports of `backend/src/osd`, `srt`, `font` | Small and well tested on the Rust side; port with the same test vectors. |
 
-Browser support target: Chromium 120+ on macOS and Windows for v1. Safari 26 has
-WebGPU and WebCodecs but no save picker (OPFS + download fallback). Firefox has
-WebCodecs and WebGPU on Windows since 2025; macOS WebGPU support should be re-checked
-at implementation time.
+Browser support target: current Chromium, Firefox and Safari on desktop. The only hard
+requirement is WebCodecs (Chromium 94+, Safari 16.4+, Firefox 130+). WebGPU is optional:
+the compositor runs on Canvas 2D everywhere and uses WebGPU only when available. The
+save picker is Chromium-only; elsewhere the output is written to the Origin Private
+File System and offered as a download.
 
 ## 3. Architecture
 
@@ -83,9 +87,14 @@ Frame timing: decoder output order equals presentation order; the OSD and SRT
 records are selected by `VideoFrame.timestamp` exactly as `FrameCompositor` does
 with the frame index / frame rate.
 
-### 3.2 Compositor (WebGPU)
+### 3.2 Compositor
 
-Port of `backend/src/gpu/`:
+Baseline (milestone 1, implemented): Canvas 2D. Each glyph is a `drawImage` of its
+character bitmap, the SRT line is `fillText` with the bundled AzeretMono font, and the
+same compositor draws the preview and the rendered frames. This needs nothing beyond
+Canvas 2D and is the path used when WebGPU is absent.
+
+Optional accelerator (later milestone): WebGPU, a port of `backend/src/gpu/`:
 
 - **Font atlas**: 16 columns of character cells in one `rgba8unorm` texture, built
   from the font PNG decoded with `createImageBitmap`. Resize to the video's character
@@ -118,7 +127,8 @@ the canvas color space. Output frames are tagged by the encoder (`colorSpace` on
 
 ```ts
 {
-  codec: "hvc1.1.6.L153.B0" | "avc1.640033",   // HEVC Main L5.1 or H.264 High 5.1
+  codec: "avc1.640033",                          // H.264 High 5.1 is the default for compatibility;
+                                                 // "hvc1.1.6.L153.B0" (HEVC) only as an opt-in where supported
   width, height,                                 // 1920x1080 or 2560x1440
   framerate: 60,
   bitrate: 40_000_000, bitrateMode: "constant",
