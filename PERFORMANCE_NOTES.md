@@ -174,6 +174,15 @@ overlapping glyph contours render white instead of the text color on the CPU.
 
 ### Stage 3: cut pipe bandwidth and move color conversion to the GPU
 
+Outcome (2026-10-19): done on branch stage3-nv12-gpu. `GpuMode::Nv12` makes the decoder
+emit nv12, the shader converts BT.709 limited range to RGB, composites, converts back to
+Y and UV planes, and the encoder takes nv12 directly (no swscale either side). The
+ffmpeg-sidecar frame reader only handles whole-byte pixel formats and panics on nv12,
+so raw frames are now read straight from the decoder's stdout; stderr still goes
+through the sidecar iterator for progress/errors. Frame buffers are recycled from
+the writer back to the reader. NV12 round-trip parity test vs a CPU reference passes.
+With hevc the pipeline is now encoder-bound at ffmpeg's VideoToolbox ceiling.
+
 - Decoder outputs `nv12` or `yuv420p` instead of `rgba` (1.5 bytes/px vs 4), and
   the shader does YUV -> RGB when sampling the frame.
 - Composite pass writes NV12/yuv420p planes (RGB -> YUV in a compute shader) so the
@@ -249,6 +258,10 @@ side, i.e. stage 3's format work, or removing the pipe entirely (stage 4).
 | 1c    | Same build, headless bench, local SSD in/out, hevc_videotoolbox -prio_speed | 268.8 | 4.48x | 48.5 s. Bottleneck flipped: reader waits 3.7 ms/frame on the decoder pipe |
 | 2     | GPU composite (wgpu/Metal), CPU round trip, hevc_videotoolbox | 258.4 | 4.31x | 50.5 s. Composite 2.9 ms/frame (CPU was 0.65) but hidden behind the decoder (3.8 ms). Parity tests pass |
 | 2     | Same, h264_videotoolbox              | 209.5 | 3.49x | Unchanged, at the ffmpeg h264 ceiling |
+| 3     | NV12 in/out via GPU shader, direct stdout reader, buffer recycling, hevc_videotoolbox | 313.5 | 5.22x | 41.6 s. Decoder wait 3.5 -> 0.8 ms/frame. Writer 99.8% blocked on the encoder: at the ffmpeg hevc ceiling |
+| 3     | Same, h264_videotoolbox              | 209.6 | 3.49x | At the ffmpeg h264 ceiling |
+| 3     | Same build, GPU RGBA frames, hevc    | 260.2 | 4.34x | Decoder-bound (3.8 ms/frame on the 8 MB RGBA pipe) |
+| 3     | Same build, CPU, hevc                | 280.0 | 4.67x | Decoder-bound; run-to-run variance is about +-5% |
 | 2b    | GPU frames in flight                 |     |       |       |
 | 3     | YUV pipes + hwaccel decode           |     |       |       |
 | 4     | Zero-copy VideoToolbox (macOS)       |     |       |       |

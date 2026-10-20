@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use backend::ffmpeg::GpuMode;
 use backend::util::Coordinates;
 use egui::{
     vec2, Button, CentralPanel, Checkbox, CollapsingHeader, Color32, CursorIcon, Grid, Image, Rect, RichText,
@@ -388,8 +389,14 @@ impl WalksnailOsdTool {
                         });
                         ui.end_row();
 
-                        ui.label("GPU compositing").on_hover_text(tooltip_text("Draw the OSD and SRT data on the GPU (experimental). Falls back to the CPU if no compatible GPU is found."));
-                        changed |= ui.add(Checkbox::without_text(&mut self.render_settings.use_gpu)).changed();
+                        ui.label("Compositing").on_hover_text(tooltip_text("Where the OSD and SRT data are drawn onto the video. GPU modes are experimental and fall back to the CPU if no compatible GPU is found. NV12 frames move less data between ffmpeg and the app and are faster."));
+                        egui::ComboBox::from_id_source("gpu_mode")
+                            .selected_text(self.render_settings.gpu_mode.to_string())
+                            .show_ui(ui, |ui| {
+                                for mode in [GpuMode::Off, GpuMode::Rgba, GpuMode::Nv12] {
+                                    changed |= ui.selectable_value(&mut self.render_settings.gpu_mode, mode, mode.to_string()).changed();
+                                }
+                            });
                         ui.end_row();
                     });
             });

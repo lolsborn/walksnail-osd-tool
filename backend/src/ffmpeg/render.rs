@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Write},
+    io::{self, ErrorKind, Read, Write},
     path::PathBuf,
     thread,
     time::Instant,
@@ -9,10 +9,13 @@ use crossbeam_channel::{Receiver, Sender};
 use ffmpeg_sidecar::{
     child::FfmpegChild,
     command::FfmpegCommand,
-    event::{FfmpegEvent, LogLevel, OutputVideoFrame},
+    event::{FfmpegEvent, LogLevel},
 };
 
-use super::{render_settings::RenderSettings, Encoder, FromFfmpegMessage, ToFfmpegMessage, VideoInfo};
+use super::{
+    render_settings::RenderSettings, Encoder, FromFfmpegMessage, GpuMode, PixelFormat, ToFfmpegMessage, VideoFrame,
+    VideoInfo,
+};
 use crate::{
     font,
     gpu::GpuCompositor,
@@ -39,30 +42,23 @@ pub fn start_video_render(
     video_info: &VideoInfo,
     render_settings: &RenderSettings,
 ) -> Result<(Sender<ToFfmpegMessage>, Receiver<FromFfmpegMessage>), io::Error> {
-    let mut decoder_process = spawn_decoder(ffmpeg_path, input_video)?;
-
-    let mut encoder_process = spawn_encoder(
-        ffmpeg_path,
-        video_info.width,
-        video_info.height,
-        video_info.frame_rate,
-        render_settings.bitrate_mbps,
-        &render_settings.encoder,
-        output_video,
-        render_settings.upscale,
-    )?;
-
-    // Channels to communicate with ffmpeg handler threads
-    let (from_ffmpeg_tx, from_ffmpeg_rx) = crossbeam_channel::unbounded();
-    let (to_ffmpeg_tx, to_ffmpeg_rx) = crossbeam_channel::unbounded();
-
     // Resize the font to the video's character size once, instead of on every glyph of every frame
     let font_file = font_file.resized(&get_character_size(video_info.height));
 
-    let gpu = if render_settings.use_gpu {
-        match GpuCompositor::new(video_info.width, video_info.height, &font_file) {
+    // Decide where to composite and which frame format to exchange with ffmpeg. If the GPU is not
+    // available fall back to CPU compositing on RGBA frames.
+    let requested_format = match render_settings.gpu_mode {
+        GpuMode::Off | GpuMode::Rgba => PixelFormat::Rgba,
+        GpuMode::Nv12 => PixelFormat::Nv12,
+    };
+    let gpu = if render_settings.gpu_mode != GpuMode::Off {
+        match GpuCompositor::new(video_info.width, video_info.height, &font_file, requested_format) {
             Ok(gpu) => {
-                tracing::info!("Compositing on the GPU ({})", gpu.adapter_name());
+                tracing::info!(
+                    "Compositing on the GPU ({}) with {:?} frames",
+                    gpu.adapter_name(),
+                    requested_format
+                );
                 Some(gpu)
             }
             Err(e) => {
@@ -73,6 +69,29 @@ pub fn start_video_render(
     } else {
         None
     };
+    let pixel_format = if gpu.is_some() {
+        requested_format
+    } else {
+        PixelFormat::Rgba
+    };
+
+    let mut decoder_process = spawn_decoder(ffmpeg_path, input_video, pixel_format)?;
+
+    let mut encoder_process = spawn_encoder(
+        ffmpeg_path,
+        video_info.width,
+        video_info.height,
+        video_info.frame_rate,
+        render_settings.bitrate_mbps,
+        &render_settings.encoder,
+        output_video,
+        render_settings.upscale,
+        pixel_format,
+    )?;
+
+    // Channels to communicate with ffmpeg handler threads
+    let (from_ffmpeg_tx, from_ffmpeg_rx) = crossbeam_channel::unbounded();
+    let (to_ffmpeg_tx, to_ffmpeg_rx) = crossbeam_channel::unbounded();
 
     let mut compositor = FrameCompositor::new(
         osd_frames,
@@ -93,41 +112,79 @@ pub fn start_video_render(
     // The stages are decoupled by bounded channels so that the two ffmpeg processes and the
     // compositing work overlap instead of running in lockstep (OS pipe buffers are far smaller
     // than one video frame, so without this every stage waits on the others).
-    let (decoded_tx, decoded_rx) = crossbeam_channel::bounded::<OutputVideoFrame>(FRAME_BUFFER_LEN);
-    let (composited_tx, composited_rx) = crossbeam_channel::bounded::<OutputVideoFrame>(FRAME_BUFFER_LEN);
+    let (decoded_tx, decoded_rx) = crossbeam_channel::bounded::<VideoFrame>(FRAME_BUFFER_LEN);
+    let (composited_tx, composited_rx) = crossbeam_channel::bounded::<VideoFrame>(FRAME_BUFFER_LEN);
+    // Frame buffers travel back from the writer to the reader to be reused, so that the steady
+    // state allocates nothing.
+    let (recycle_tx, recycle_rx) = crossbeam_channel::bounded::<Vec<u8>>(FRAME_BUFFER_LEN * 3);
 
-    let decoder_iter = decoder_process
+    // Raw frames are read straight from the decoder's stdout; its stderr (progress and errors)
+    // still goes through the sidecar's event iterator on its own thread.
+    let decoder_stdout = decoder_process
+        .take_stdout()
+        .expect("Failed to take the decoder's stdout");
+    let decoder_events = decoder_process
         .iter()
         .expect("Failed to create `FfmpegIterator` for decoder");
     let decoder_events_tx = from_ffmpeg_tx.clone();
     thread::Builder::new()
+        .name("Decoder events".into())
+        .spawn(move || {
+            tracing::info_span!("Decoder events thread").in_scope(|| {
+                for event in decoder_events {
+                    handle_decoder_events(event, &decoder_events_tx);
+                }
+            });
+        })
+        .expect("Failed to spawn decoder events thread");
+
+    let (width, height, frame_rate) = (video_info.width, video_info.height, video_info.frame_rate);
+    let frame_bytes = pixel_format.frame_bytes(width, height);
+    thread::Builder::new()
         .name("Decoder reader".into())
         .spawn(move || {
             tracing::info_span!("Decoder reader thread").in_scope(|| {
+                let mut decoder_process = decoder_process;
+                let mut decoder_stdout = decoder_stdout;
                 let mut timings = RenderTimings::default();
-                let mut wait_start = Instant::now();
-                for event in decoder_iter {
-                    // On every event check if the render should be stopped
+                let mut frame_index = 0u32;
+                loop {
+                    // Between frames check if the render should be stopped
                     while let Ok(ToFfmpegMessage::AbortRender) = to_ffmpeg_rx.try_recv() {
                         decoder_process
                             .quit()
                             .map_err(|e| tracing::warn!("Failed to send quit to decoder: {e}"))
                             .ok();
                     }
-                    match event {
-                        FfmpegEvent::OutputFrame(frame) => {
-                            timings.decoder_wait += wait_start.elapsed();
-                            timings.frames += 1;
-                            let send_start = Instant::now();
-                            if decoded_tx.send(frame).is_err() {
-                                // Compositor is gone, stop reading
-                                break;
-                            }
-                            timings.output_wait += send_start.elapsed();
-                            wait_start = Instant::now();
+
+                    let mut data = recycle_rx.try_recv().unwrap_or_default();
+                    data.resize(frame_bytes, 0);
+                    let wait_start = Instant::now();
+                    match decoder_stdout.read_exact(&mut data) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+                        Err(e) => {
+                            tracing::warn!("Failed to read frame from decoder: {e}");
+                            break;
                         }
-                        other_event => handle_decoder_events(other_event, &decoder_events_tx),
                     }
+                    timings.decoder_wait += wait_start.elapsed();
+                    timings.frames += 1;
+
+                    let frame = VideoFrame {
+                        width,
+                        height,
+                        timestamp: frame_index as f32 / frame_rate,
+                        data,
+                    };
+                    frame_index += 1;
+
+                    let send_start = Instant::now();
+                    if decoded_tx.send(frame).is_err() {
+                        // Compositor is gone, stop reading
+                        break;
+                    }
+                    timings.output_wait += send_start.elapsed();
                 }
                 timings.log_summary("decoder reader");
             });
@@ -176,6 +233,7 @@ pub fn start_video_render(
                         break;
                     }
                     timings.encoder_write += write_start.elapsed();
+                    recycle_tx.try_send(frame.data).ok();
                 }
                 timings.log_summary("encoder writer");
             });
@@ -199,11 +257,15 @@ pub fn start_video_render(
 }
 
 #[tracing::instrument(skip(ffmpeg_path))]
-pub fn spawn_decoder(ffmpeg_path: &PathBuf, input_video: &PathBuf) -> Result<FfmpegChild, io::Error> {
+pub fn spawn_decoder(
+    ffmpeg_path: &PathBuf,
+    input_video: &PathBuf,
+    pixel_format: PixelFormat,
+) -> Result<FfmpegChild, io::Error> {
     let decoder = FfmpegCommand::new_with_path(ffmpeg_path)
         .create_no_window()
         .input(input_video.to_str().unwrap())
-        .args(["-f", "rawvideo", "-pix_fmt", "rgba", "-"])
+        .args(["-f", "rawvideo", "-pix_fmt", pixel_format.ffmpeg_name(), "-"])
         .spawn()?;
     Ok(decoder)
 }
@@ -218,13 +280,14 @@ pub fn spawn_encoder(
     video_encoder: &Encoder,
     output_video: &PathBuf,
     upscale: bool,
+    input_pixel_format: PixelFormat,
 ) -> Result<FfmpegChild, io::Error> {
     let mut encoder_command = FfmpegCommand::new_with_path(ffmpeg_path);
 
     encoder_command
         .create_no_window()
         .format("rawvideo")
-        .pix_fmt("rgba")
+        .pix_fmt(input_pixel_format.ffmpeg_name())
         .size(width, height)
         .rate(frame_rate)
         .input("-");
@@ -233,8 +296,13 @@ pub fn spawn_encoder(
         encoder_command.args(["-vf", "scale=2560x1440:flags=bicubic"]);
     }
 
+    // RGBA input needs a conversion to a format the encoders accept. NV12 is accepted directly by
+    // the hardware encoders and by libx264/libx265, so no conversion is requested.
+    if input_pixel_format == PixelFormat::Rgba {
+        encoder_command.pix_fmt("yuv420p");
+    }
+
     encoder_command
-        .pix_fmt("yuv420p")
         .codec_video(&video_encoder.name)
         .args(["-b:v", &format!("{}M", bitrate_mbps)])
         .args(&video_encoder.extra_args)

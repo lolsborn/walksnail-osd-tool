@@ -1,10 +1,10 @@
 use std::{iter::Peekable, time::Instant, vec::IntoIter};
 
-use ffmpeg_sidecar::event::OutputVideoFrame;
 use image::{Rgba, RgbaImage};
 
 use super::{overlay_osd, overlay_srt_data, srt_layout, srt_text, RenderTimings};
 use crate::{
+    ffmpeg::VideoFrame,
     font,
     gpu::{build_glyph_instances, rasterize_text, GpuCompositor},
     osd::{self, OsdOptions},
@@ -82,7 +82,7 @@ impl<'a> FrameCompositor<'a> {
     }
 
     /// Draw the overlays for this video frame in place and return it.
-    pub fn composite(&mut self, mut video_frame: OutputVideoFrame) -> OutputVideoFrame {
+    pub fn composite(&mut self, mut video_frame: VideoFrame) -> VideoFrame {
         let start = Instant::now();
         self.timings.frames += 1;
 
@@ -139,7 +139,7 @@ impl<'a> FrameCompositor<'a> {
         video_frame
     }
 
-    fn composite_gpu(&mut self, video_frame: &mut OutputVideoFrame, start: Instant) {
+    fn composite_gpu(&mut self, video_frame: &mut VideoFrame, start: Instant) {
         let gpu = self.gpu.as_mut().unwrap();
 
         if self.osd_dirty {

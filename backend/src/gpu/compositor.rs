@@ -5,6 +5,7 @@ use image::RgbaImage;
 
 use super::{FontAtlas, GpuContext, GpuError, TextStrip};
 use crate::{
+    ffmpeg::PixelFormat,
     font::FontFile,
     osd::{self, OsdOptions},
 };
@@ -61,12 +62,38 @@ struct TextQuad {
     texture: wgpu::Texture,
 }
 
+/// Resources for exchanging NV12 frames with ffmpeg: the input planes, the conversion passes and
+/// the output planes.
+struct Nv12Io {
+    y_in: wgpu::Texture,
+    uv_in: wgpu::Texture,
+    y_out_view: wgpu::TextureView,
+    uv_out_view: wgpu::TextureView,
+    y_out: wgpu::Texture,
+    uv_out: wgpu::Texture,
+    /// Y and UV input planes, read by the NV12 -> RGB pass.
+    input_bind_group: wgpu::BindGroup,
+    /// The composited frame, read by the RGB -> NV12 passes. Kept separate from the input group
+    /// because the frame texture is the render target while the input planes are read.
+    output_bind_group: wgpu::BindGroup,
+    nv12_to_rgb: wgpu::RenderPipeline,
+    rgb_to_y: wgpu::RenderPipeline,
+    rgb_to_uv: wgpu::RenderPipeline,
+    /// Row stride of the Y plane in the readback buffer.
+    y_padded_bytes_per_row: u32,
+    /// Row stride of the UV plane in the readback buffer, which starts at `uv_offset`.
+    uv_padded_bytes_per_row: u32,
+    uv_offset: u64,
+}
+
 /// Composites OSD glyphs and SRT text onto video frames on the GPU. One instance handles one
 /// video size and one font. Frames go CPU -> GPU -> CPU; stage 2 of the roadmap.
 pub struct GpuCompositor {
     ctx: GpuContext,
     width: u32,
     height: u32,
+    pixel_format: PixelFormat,
+    nv12: Option<Nv12Io>,
     pipeline: wgpu::RenderPipeline,
     uniform_bind_group: wgpu::BindGroup,
     texture_layout: wgpu::BindGroupLayout,
@@ -84,9 +111,10 @@ pub struct GpuCompositor {
 
 impl GpuCompositor {
     /// Set up a compositor for `width` x `height` frames with the given font, which must already be
-    /// resized to the character size matching the video height.
+    /// resized to the character size matching the video height. `pixel_format` is the format of the
+    /// frames passed to and returned from `composite`.
     #[tracing::instrument(skip(font), err)]
-    pub fn new(width: u32, height: u32, font: &FontFile) -> Result<Self, GpuError> {
+    pub fn new(width: u32, height: u32, font: &FontFile, pixel_format: PixelFormat) -> Result<Self, GpuError> {
         let ctx = GpuContext::new()?;
         let device = &ctx.device;
 
@@ -226,7 +254,8 @@ impl GpuCompositor {
             format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_DST
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
         let frame_view = frame_texture.create_view(&Default::default());
@@ -234,9 +263,17 @@ impl GpuCompositor {
         // Readback rows must be aligned to COPY_BYTES_PER_ROW_ALIGNMENT
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
         let padded_bytes_per_row = (width * 4).div_ceil(align) * align;
+        let nv12 = match pixel_format {
+            PixelFormat::Rgba => None,
+            PixelFormat::Nv12 => Some(Self::create_nv12_io(device, width, height, &frame_texture)),
+        };
+        let readback_size = match &nv12 {
+            None => (padded_bytes_per_row * height) as u64,
+            Some(io) => io.uv_offset + (io.uv_padded_bytes_per_row * (height / 2)) as u64,
+        };
         let staging_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
-            size: (padded_bytes_per_row * height) as u64,
+            size: readback_size,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -248,6 +285,8 @@ impl GpuCompositor {
             ctx,
             width,
             height,
+            pixel_format,
+            nv12,
             pipeline,
             uniform_bind_group,
             texture_layout,
@@ -262,6 +301,198 @@ impl GpuCompositor {
             glyph_count: 0,
             text: None,
         })
+    }
+
+    fn create_plane_texture(
+        device: &wgpu::Device,
+        label: &str,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage,
+            view_formats: &[],
+        })
+    }
+
+    fn create_nv12_io(device: &wgpu::Device, width: u32, height: u32, frame_texture: &wgpu::Texture) -> Nv12Io {
+        let (uv_width, uv_height) = (width / 2, height / 2);
+        let input_usage = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+        let output_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC;
+        let y_in = Self::create_plane_texture(
+            device,
+            "nv12 y in",
+            width,
+            height,
+            wgpu::TextureFormat::R8Unorm,
+            input_usage,
+        );
+        let uv_in = Self::create_plane_texture(
+            device,
+            "nv12 uv in",
+            uv_width,
+            uv_height,
+            wgpu::TextureFormat::Rg8Unorm,
+            input_usage,
+        );
+        let y_out = Self::create_plane_texture(
+            device,
+            "nv12 y out",
+            width,
+            height,
+            wgpu::TextureFormat::R8Unorm,
+            output_usage,
+        );
+        let uv_out = Self::create_plane_texture(
+            device,
+            "nv12 uv out",
+            uv_width,
+            uv_height,
+            wgpu::TextureFormat::Rg8Unorm,
+            output_usage,
+        );
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("nv12 conversion shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("convert.wgsl").into()),
+        });
+        let texture_entry = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let input_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("nv12 input planes"),
+            entries: &[texture_entry(0), texture_entry(1)],
+        });
+        let output_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composited frame"),
+            entries: &[texture_entry(2)],
+        });
+        let input_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("nv12 input planes"),
+            layout: &input_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&y_in.create_view(&Default::default())),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&uv_in.create_view(&Default::default())),
+                },
+            ],
+        });
+        let output_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composited frame"),
+            layout: &output_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&frame_texture.create_view(&Default::default())),
+            }],
+        });
+        let input_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("nv12 to rgb"),
+            bind_group_layouts: &[&input_layout],
+            push_constant_ranges: &[],
+        });
+        let output_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rgb to nv12"),
+            bind_group_layouts: &[&output_layout],
+            push_constant_ranges: &[],
+        });
+        let make_pipeline =
+            |label: &str, entry_point: &str, format: wgpu::TextureFormat, layout: &wgpu::PipelineLayout| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: "fullscreen_vs",
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point,
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    multiview: None,
+                })
+            };
+        let nv12_to_rgb = make_pipeline(
+            "nv12 to rgb",
+            "nv12_to_rgb_fs",
+            wgpu::TextureFormat::Rgba8Unorm,
+            &input_pipeline_layout,
+        );
+        let rgb_to_y = make_pipeline(
+            "rgb to y",
+            "rgb_to_y_fs",
+            wgpu::TextureFormat::R8Unorm,
+            &output_pipeline_layout,
+        );
+        let rgb_to_uv = make_pipeline(
+            "rgb to uv",
+            "rgb_to_uv_fs",
+            wgpu::TextureFormat::Rg8Unorm,
+            &output_pipeline_layout,
+        );
+
+        let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let y_padded_bytes_per_row = width.div_ceil(align) * align;
+        let uv_padded_bytes_per_row = (uv_width * 2).div_ceil(align) * align;
+        // Buffer offsets for texture copies must be aligned too (align is a multiple of that)
+        let uv_offset = (y_padded_bytes_per_row * height) as u64;
+
+        Nv12Io {
+            y_out_view: y_out.create_view(&Default::default()),
+            uv_out_view: uv_out.create_view(&Default::default()),
+            y_in,
+            uv_in,
+            y_out,
+            uv_out,
+            input_bind_group,
+            output_bind_group,
+            nv12_to_rgb,
+            rgb_to_y,
+            rgb_to_uv,
+            y_padded_bytes_per_row,
+            uv_padded_bytes_per_row,
+            uv_offset,
+        }
+    }
+
+    pub fn pixel_format(&self) -> PixelFormat {
+        self.pixel_format
     }
 
     fn create_instance_buffer(device: &wgpu::Device, label: &str, capacity: usize) -> wgpu::Buffer {
@@ -367,15 +598,20 @@ impl GpuCompositor {
             .write_buffer(&text.instance_buffer, 0, bytemuck::bytes_of(&instance));
     }
 
-    /// Draw the current glyphs and text onto `frame` (RGBA, width * height * 4 bytes) in place.
+    /// Draw the current glyphs and text onto `frame` in place. The frame is in the compositor's
+    /// pixel format (RGBA: width * height * 4 bytes; NV12: a Y plane followed by a UV plane).
     /// With a chroma key the frame contents are ignored and the key color is used as background.
     pub fn composite(&mut self, frame: &mut Vec<u8>, chroma_key: Option<[u8; 3]>) {
+        debug_assert_eq!(frame.len(), self.pixel_format.frame_bytes(self.width, self.height));
         let extent = wgpu::Extent3d {
             width: self.width,
             height: self.height,
             depth_or_array_layers: 1,
         };
 
+        // Upload the input frame. With a chroma key the input is ignored and the frame texture is
+        // cleared instead. NV12 input is converted to RGB by the first draw of the overlay pass.
+        let mut convert_input = false;
         let load = match chroma_key {
             Some([r, g, b]) => wgpu::LoadOp::Clear(wgpu::Color {
                 r: r as f64 / 255.0,
@@ -383,19 +619,47 @@ impl GpuCompositor {
                 b: b as f64 / 255.0,
                 a: 1.0,
             }),
-            None => {
-                self.ctx.queue.write_texture(
-                    self.frame_texture.as_image_copy(),
-                    frame,
-                    wgpu::ImageDataLayout {
-                        offset: 0,
-                        bytes_per_row: Some(self.width * 4),
-                        rows_per_image: Some(self.height),
-                    },
-                    extent,
-                );
-                wgpu::LoadOp::Load
-            }
+            None => match &self.nv12 {
+                None => {
+                    self.ctx.queue.write_texture(
+                        self.frame_texture.as_image_copy(),
+                        frame,
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(self.width * 4),
+                            rows_per_image: Some(self.height),
+                        },
+                        extent,
+                    );
+                    wgpu::LoadOp::Load
+                }
+                Some(io) => {
+                    let y_bytes = (self.width * self.height) as usize;
+                    self.ctx.queue.write_texture(
+                        io.y_in.as_image_copy(),
+                        &frame[..y_bytes],
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(self.width),
+                            rows_per_image: Some(self.height),
+                        },
+                        extent,
+                    );
+                    self.ctx.queue.write_texture(
+                        io.uv_in.as_image_copy(),
+                        &frame[y_bytes..],
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(self.width),
+                            rows_per_image: Some(self.height / 2),
+                        },
+                        io.uv_in.size(),
+                    );
+                    convert_input = true;
+                    // Every pixel is overwritten by the conversion, no need to load or clear
+                    wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                }
+            },
         };
 
         let mut encoder = self.ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -416,6 +680,12 @@ impl GpuCompositor {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            if convert_input {
+                let io = self.nv12.as_ref().unwrap();
+                pass.set_pipeline(&io.nv12_to_rgb);
+                pass.set_bind_group(0, &io.input_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             if self.glyph_count > 0 {
@@ -429,18 +699,66 @@ impl GpuCompositor {
                 pass.draw(0..6, 0..1);
             }
         }
-        encoder.copy_texture_to_buffer(
-            self.frame_texture.as_image_copy(),
-            wgpu::ImageCopyBuffer {
-                buffer: &self.staging_buffer,
-                layout: wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_bytes_per_row),
-                    rows_per_image: Some(self.height),
+        match &self.nv12 {
+            None => encoder.copy_texture_to_buffer(
+                self.frame_texture.as_image_copy(),
+                wgpu::ImageCopyBuffer {
+                    buffer: &self.staging_buffer,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(self.padded_bytes_per_row),
+                        rows_per_image: Some(self.height),
+                    },
                 },
-            },
-            extent,
-        );
+                extent,
+            ),
+            Some(io) => {
+                // Convert the composited frame back to NV12 planes, then copy them out
+                for (view, pipeline) in [(&io.y_out_view, &io.rgb_to_y), (&io.uv_out_view, &io.rgb_to_uv)] {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("rgb to nv12"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &io.output_bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                encoder.copy_texture_to_buffer(
+                    io.y_out.as_image_copy(),
+                    wgpu::ImageCopyBuffer {
+                        buffer: &self.staging_buffer,
+                        layout: wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(io.y_padded_bytes_per_row),
+                            rows_per_image: Some(self.height),
+                        },
+                    },
+                    extent,
+                );
+                encoder.copy_texture_to_buffer(
+                    io.uv_out.as_image_copy(),
+                    wgpu::ImageCopyBuffer {
+                        buffer: &self.staging_buffer,
+                        layout: wgpu::ImageDataLayout {
+                            offset: io.uv_offset,
+                            bytes_per_row: Some(io.uv_padded_bytes_per_row),
+                            rows_per_image: Some(self.height / 2),
+                        },
+                    },
+                    io.uv_out.size(),
+                );
+            }
+        }
         self.ctx.queue.submit(Some(encoder.finish()));
 
         // Synchronous readback (stage 2). Overlapping frames comes in the next stage.
@@ -455,17 +773,39 @@ impl GpuCompositor {
             .expect("Failed to map readback buffer");
         {
             let mapped = slice.get_mapped_range();
-            let row_bytes = (self.width * 4) as usize;
             frame.clear();
-            if self.padded_bytes_per_row as usize == row_bytes {
-                frame.extend_from_slice(&mapped);
-            } else {
-                for row in mapped.chunks(self.padded_bytes_per_row as usize) {
-                    frame.extend_from_slice(&row[..row_bytes]);
+            match &self.nv12 {
+                None => Self::unpad_rows(
+                    frame,
+                    &mapped,
+                    (self.width * 4) as usize,
+                    self.padded_bytes_per_row as usize,
+                ),
+                Some(io) => {
+                    let y_region = &mapped[..io.uv_offset as usize];
+                    Self::unpad_rows(frame, y_region, self.width as usize, io.y_padded_bytes_per_row as usize);
+                    let uv_region = &mapped[io.uv_offset as usize..];
+                    Self::unpad_rows(
+                        frame,
+                        uv_region,
+                        self.width as usize,
+                        io.uv_padded_bytes_per_row as usize,
+                    );
                 }
             }
         }
         self.staging_buffer.unmap();
+    }
+
+    /// Append the rows of a padded readback region to `out`, dropping the row padding.
+    fn unpad_rows(out: &mut Vec<u8>, region: &[u8], row_bytes: usize, padded_row_bytes: usize) {
+        if padded_row_bytes == row_bytes {
+            out.extend_from_slice(region);
+        } else {
+            for row in region.chunks(padded_row_bytes) {
+                out.extend_from_slice(&row[..row_bytes]);
+            }
+        }
     }
 
     /// Convenience for tests and previews: composite onto an image.
@@ -566,7 +906,11 @@ mod tests {
     }
 
     fn gpu_or_skip(width: u32, height: u32, font: &FontFile) -> Option<GpuCompositor> {
-        match GpuCompositor::new(width, height, font) {
+        gpu_or_skip_with(width, height, font, PixelFormat::Rgba)
+    }
+
+    fn gpu_or_skip_with(width: u32, height: u32, font: &FontFile, format: PixelFormat) -> Option<GpuCompositor> {
+        match GpuCompositor::new(width, height, font, format) {
             Ok(gpu) => Some(gpu),
             Err(e) => {
                 eprintln!("Skipping GPU test, no usable GPU: {e}");
@@ -667,5 +1011,128 @@ mod tests {
             "{saturated} over-covered pixels is more than expected"
         );
         assert!(max <= 2, "max channel difference {max} over {count} pixels");
+    }
+
+    // CPU reference implementation of the BT.709 limited range conversions in convert.wgsl
+
+    fn rgb_to_yuv(r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+        let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
+        let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        let cb = (b - y) / 1.8556;
+        let cr = (r - y) / 1.5748;
+        (16.0 + y * 219.0, 128.0 + cb * 224.0, 128.0 + cr * 224.0)
+    }
+
+    fn yuv_to_rgb(y: u8, u: u8, v: u8) -> Rgba<u8> {
+        let yy = (y as f32 - 16.0) / 219.0;
+        let cb = (u as f32 - 128.0) / 224.0;
+        let cr = (v as f32 - 128.0) / 224.0;
+        let to_u8 = |x: f32| (x.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Rgba([
+            to_u8(yy + 1.5748 * cr),
+            to_u8(yy - 0.1873 * cb - 0.4681 * cr),
+            to_u8(yy + 1.8556 * cb),
+            255,
+        ])
+    }
+
+    fn rgba_to_nv12(image: &RgbaImage) -> Vec<u8> {
+        let (w, h) = image.dimensions();
+        let mut out = Vec::with_capacity((w * h * 3 / 2) as usize);
+        for p in image.pixels() {
+            out.push(rgb_to_yuv(p.0[0], p.0[1], p.0[2]).0.round() as u8);
+        }
+        for by in 0..h / 2 {
+            for bx in 0..w / 2 {
+                let (mut u, mut v) = (0.0, 0.0);
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let p = image.get_pixel(bx * 2 + dx, by * 2 + dy);
+                    let (_, pu, pv) = rgb_to_yuv(p.0[0], p.0[1], p.0[2]);
+                    u += pu;
+                    v += pv;
+                }
+                out.push((u / 4.0).round() as u8);
+                out.push((v / 4.0).round() as u8);
+            }
+        }
+        out
+    }
+
+    fn nv12_to_rgba(data: &[u8], w: u32, h: u32) -> RgbaImage {
+        let y_plane = &data[..(w * h) as usize];
+        let uv_plane = &data[(w * h) as usize..];
+        RgbaImage::from_fn(w, h, |x, y| {
+            let yy = y_plane[(y * w + x) as usize];
+            let uv_index = ((y / 2) * (w / 2) + x / 2) as usize * 2;
+            yuv_to_rgb(yy, uv_plane[uv_index], uv_plane[uv_index + 1])
+        })
+    }
+
+    fn max_plane_diff(a: &[u8], b: &[u8]) -> u8 {
+        a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn gpu_nv12_round_trip_matches_cpu_reference() {
+        let (width, height) = (1920, 1080);
+        let font = synthetic_font(CharacterSize::Large);
+        let Some(mut gpu) = gpu_or_skip_with(width, height, &font, PixelFormat::Nv12) else {
+            return;
+        };
+        assert_eq!(gpu.pixel_format(), PixelFormat::Nv12);
+        let options = OsdOptions::default();
+        let frame = osd_frame();
+
+        // Input: a gradient frame as NV12
+        let input = rgba_to_nv12(&base_frame(width, height));
+
+        // CPU reference: NV12 -> RGB (chroma replicated) -> overlay -> NV12
+        let mut reference = nv12_to_rgba(&input, width, height);
+        overlay_osd(&mut reference, &frame, &font, &options);
+        let expected = rgba_to_nv12(&reference);
+
+        let mut output = input.clone();
+        gpu.set_glyphs(&build_glyph_instances(&frame, &options, gpu.atlas()));
+        gpu.composite(&mut output, None);
+
+        assert_eq!(output.len(), expected.len());
+        let y_len = (width * height) as usize;
+        let y_diff = max_plane_diff(&output[..y_len], &expected[..y_len]);
+        let uv_diff = max_plane_diff(&output[y_len..], &expected[y_len..]);
+        assert!(y_diff <= 2, "Y plane differs by up to {y_diff}");
+        assert!(uv_diff <= 2, "UV plane differs by up to {uv_diff}");
+
+        // Without an overlay the GPU round trip must match the CPU reference round trip. The raw
+        // input is not recoverable in general: out-of-gamut YUV combinations clamp in RGB.
+        gpu.set_glyphs(&[]);
+        let mut plain = input.clone();
+        gpu.composite(&mut plain, None);
+        let reference = rgba_to_nv12(&nv12_to_rgba(&input, width, height));
+        let y_diff = max_plane_diff(&plain[..y_len], &reference[..y_len]);
+        let uv_diff = max_plane_diff(&plain[y_len..], &reference[y_len..]);
+        assert!(
+            y_diff <= 2 && uv_diff <= 2,
+            "round trip differs from reference: Y {y_diff}, UV {uv_diff}"
+        );
+
+        // An in-gamut, low-saturation input must come back unchanged up to rounding, which checks
+        // that the two conversion matrices are inverses of each other.
+        let soft = RgbaImage::from_fn(width, height, |x, y| {
+            Rgba([
+                (64 + x % 128) as u8,
+                (64 + y % 128) as u8,
+                (96 + (x + y) % 64) as u8,
+                255,
+            ])
+        });
+        let soft_input = rgba_to_nv12(&soft);
+        let mut soft_output = soft_input.clone();
+        gpu.composite(&mut soft_output, None);
+        let y_diff = max_plane_diff(&soft_output[..y_len], &soft_input[..y_len]);
+        let uv_diff = max_plane_diff(&soft_output[y_len..], &soft_input[y_len..]);
+        assert!(
+            y_diff <= 1 && uv_diff <= 1,
+            "in-gamut round trip changed the video: Y {y_diff}, UV {uv_diff}"
+        );
     }
 }
