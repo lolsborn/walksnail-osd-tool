@@ -171,8 +171,24 @@ Takeaways:
 - Measurement protocol from here: h264_videotoolbox, let the render complete, and
   use the summary's frames / total_secs rather than the UI's live number, which
   fluctuates (77-99 observed for a 119.5 fps average).
-| 1     | GPU composite, CPU round trip        |     |       |       |
-| 2     | Frames in flight                     |     |       |       |
+| 1     | Pipelined I/O (3 threads, bounded channels), h264_videotoolbox | 155.5 | 2.59x | Full run: 13035 frames in 83.9 s. +30% over stage 0 (119.5) |
+
+Stage 1 breakdown (h264_videotoolbox, full run, ms per frame):
+
+| Thread         | waits on input | work            | waits on output | encoder write |
+|----------------|----------------|-----------------|-----------------|---------------|
+| decoder reader | 2.74 (decoder) | -               | 3.69            | -             |
+| compositor     | 1.86           | 0.67 (osd)      | 3.90            | -             |
+| encoder writer | 0.72           | -               | -               | 5.72          |
+
+The encoder writer is the bottleneck: 5.7 ms/frame blocked writing RGBA into the
+encoder ffmpeg (pipe write + swscale rgba->yuv420p + VideoToolbox encode on that
+side). Decoder and compositor are mostly idle. Next lever is what crosses that
+pipe: fewer bytes (NV12 is 2.7x smaller than RGBA) and no swscale on the encoder
+side, i.e. stage 3's format work, or removing the pipe entirely (stage 4).
+
+| 2     | GPU composite, CPU round trip (infrastructure, parity test) |     |       |       |
+| 2b    | GPU frames in flight                 |     |       |       |
 | 3     | YUV pipes + hwaccel decode           |     |       |       |
 | 4     | Zero-copy VideoToolbox (macOS)       |     |       |       |
 
