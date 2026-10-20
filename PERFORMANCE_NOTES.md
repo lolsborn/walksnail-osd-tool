@@ -163,6 +163,19 @@ bench). Three parity tests vs the CPU path (OSD, chroma key, SRT text) pass with
 rounding. Found a CPU-path artifact: imageproc does not clamp rusttype coverage, so
 overlapping glyph contours render white instead of the text color on the CPU.
 
+### Roadmap status after stage 3 (2026-10-19)
+
+1080p on an Apple M3 Pro is encoder-bound at the media engine's limit (HEVC ~318 fps,
+H.264 ~207 fps). Stage 3 reaches 313.5 fps. The remaining stages below cannot raise
+1080p throughput on this hardware and are parked:
+- 2b (GPU frames in flight) only matters if the compositor becomes the bottleneck,
+  e.g. at 4K or on a machine with a much faster encoder.
+- 4 (in-process VideoToolbox) would remove ffmpeg and the pipe copies but not add
+  speed. Worth it only for packaging reasons.
+Default compositing on macOS is now `GpuMode::Nv12`; other platforms default to CPU.
+Untested so far: 4K and 2.7K clips (row padding paths in the readback), Windows/Linux
+GPU backends.
+
 ### Stage 2b: keep several frames in flight
 
 - Ring of N staging buffers and textures (N = 3 or 4). Submit frame k while frame
@@ -205,6 +218,9 @@ no copies. 3000 frames of the test clip, 40 Mbps, speed prioritized.
 | VT encode only, H.264                  | 207.0  |
 | VT decode + encode streamed, HEVC      | 317.8  |
 | VT decode + encode streamed, H.264     | 206.9  |
+
+Two and four parallel VT sessions: 315 / 318 fps total for HEVC, 202 for H.264 with two.
+One media engine; parallel sessions do not scale.
 
 These equal the ffmpeg ceilings (321 / 207). ffmpeg's wrapper adds nothing; the
 Apple M3 Pro media engine's encoder is the limit. Stage 3 at 313.5 fps is at 98% of

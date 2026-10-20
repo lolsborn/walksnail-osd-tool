@@ -94,6 +94,11 @@ impl Default for RenderSettings {
             upscale: false,
             use_chroma_key: false,
             chroma_key: [1.0 / 255.0, 177.0 / 255.0, 64.0 / 255.0],
+            // GPU compositing with NV12 frames is the fastest validated path on macOS. Other
+            // platforms keep the CPU path until the GPU path has been tested there.
+            #[cfg(target_os = "macos")]
+            gpu_mode: GpuMode::Nv12,
+            #[cfg(not(target_os = "macos"))]
             gpu_mode: GpuMode::Off,
         }
     }
