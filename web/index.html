@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Nothing leaves the computer: the page may not open any network connection. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'none'; img-src 'self' blob:; media-src 'self' blob:; font-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:"
+    />
+    <title>Walksnail OSD Tool</title>
+    <link rel="stylesheet" href="./src/ui/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Walksnail OSD Tool</h1>
+      <p class="privacy">Runs entirely in your browser. Your files are never uploaded.</p>
+    </header>
+    <main>
+      <section class="files">
+        <label>Video (.mp4) <input type="file" id="video-file" accept="video/mp4,.mp4" /></label>
+        <label>OSD (.osd) <input type="file" id="osd-file" accept=".osd" /></label>
+        <label>SRT (.srt, optional) <input type="file" id="srt-file" accept=".srt" /></label>
+        <label>Font (.png) <input type="file" id="font-file" accept="image/png,.png" /></label>
+        <div id="file-info" class="info"></div>
+      </section>
+      <section class="preview">
+        <canvas id="preview"></canvas>
+        <div class="controls">
+          <input type="range" id="scrub" min="0" max="0" step="1" value="0" />
+          <span id="scrub-time">0:00</span>
+        </div>
+      </section>
+      <section class="settings">
+        <fieldset>
+          <legend>OSD</legend>
+          <label>Horizontal offset <input type="number" id="osd-x" value="0" step="1" /></label>
+          <label>Vertical offset <input type="number" id="osd-y" value="0" step="1" /></label>
+          <label><input type="checkbox" id="osd-adjust-speed" checked /> Adjust OSD playback speed to the video length</label>
+        </fieldset>
+        <fieldset>
+          <legend>SRT data</legend>
+          <label>Horizontal position (%) <input type="number" id="srt-x" value="1.5" step="0.1" min="0" max="100" /></label>
+          <label>Vertical position (%) <input type="number" id="srt-y" value="95" step="0.1" min="0" max="100" /></label>
+          <label>Font size <input type="number" id="srt-scale" value="35" step="1" min="10" max="60" /></label>
+          <div class="toggles">
+            <label><input type="checkbox" id="srt-time" /> Time</label>
+            <label><input type="checkbox" id="srt-sbat" /> Sky battery</label>
+            <label><input type="checkbox" id="srt-gbat" /> Ground battery</label>
+            <label><input type="checkbox" id="srt-signal" checked /> Signal</label>
+            <label><input type="checkbox" id="srt-latency" checked /> Latency</label>
+            <label><input type="checkbox" id="srt-bitrate" checked /> Bitrate</label>
+            <label><input type="checkbox" id="srt-distance" checked /> Distance</label>
+          </div>
+        </fieldset>
+      </section>
+    </main>
+    <video id="video" muted playsinline hidden></video>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

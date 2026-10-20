@@ -1,0 +1,81 @@
+@font-face {
+  font-family: "AzeretMono";
+  src: url("/fonts/AzeretMono-Regular.ttf") format("truetype");
+}
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+body {
+  margin: 0 auto;
+  max-width: 1200px;
+  padding: 16px;
+}
+header h1 {
+  margin: 0 0 4px;
+  font-size: 1.4rem;
+}
+.privacy {
+  margin: 0 0 16px;
+  opacity: 0.8;
+}
+main {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: 1fr;
+}
+.files {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+.files label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.9rem;
+}
+.info {
+  grid-column: 1 / -1;
+  font-size: 0.85rem;
+  white-space: pre-line;
+  opacity: 0.9;
+}
+.preview canvas {
+  width: 100%;
+  height: auto;
+  background: #111;
+  display: block;
+  border-radius: 4px;
+}
+.controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.controls input[type="range"] {
+  flex: 1;
+}
+.settings {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+}
+fieldset {
+  border: 1px solid #8884;
+  border-radius: 4px;
+}
+fieldset label {
+  display: block;
+  margin: 4px 0;
+  font-size: 0.9rem;
+}
+fieldset input[type="number"] {
+  width: 6em;
+}
+.toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+}
