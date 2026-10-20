@@ -192,9 +192,11 @@ impl eframe::App for WalksnailOsdTool {
 
         self.update_window(ctx);
 
-        // Keep updating the UI thread when rendering to make sure the indicated progress is up-to-date
+        // Keep updating the UI thread when rendering to make sure the indicated progress is up-to-date.
+        // A few times per second is plenty; repainting every frame makes the window compete with the
+        // render pipeline for the GPU.
         if self.render_status.is_in_progress() {
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
 
         self.receive_ffmpeg_message();
