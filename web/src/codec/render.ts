@@ -91,6 +91,8 @@ export class Renderer {
     settings: RenderSettings,
     onProgress: (p: RenderProgress) => void,
     onStage: (stage: string) => void = () => undefined,
+    /** Called with the composited frame while it is still on the canvas, for a live preview. */
+    onFrame: (canvas: OffscreenCanvas, timeSecs: number) => void = () => undefined,
   ): Promise<void> {
     onStage("Reading the video index...");
     const demuxer = await Demuxer.open(inputs.video);
@@ -173,6 +175,7 @@ export class Renderer {
         const data = srtFrames[srtFrameIndexAt(srtFrames, tSecs)]?.data;
         if (data) drawSrt(ctx, data, inputs.srtOptions, video.width, video.height);
       }
+      onFrame(canvas, tSecs);
       const out = new VideoFrame(canvas, { timestamp: frame.timestamp, duration: frame.duration ?? undefined });
       frame.close();
       encoder.encode(out, { keyFrame: framesSubmitted % 120 === 0 });

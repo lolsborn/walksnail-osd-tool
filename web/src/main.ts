@@ -247,6 +247,23 @@ function updateRenderButton(): void {
   }
 }
 
+/** Mirror the frame being rendered onto the preview, a few times per second. */
+let lastPreviewUpdate = 0;
+function showRenderedFrame(rendered: OffscreenCanvas, timeSecs: number): void {
+  const now = performance.now();
+  if (now - lastPreviewUpdate < 100) return;
+  lastPreviewUpdate = now;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  if (canvas.width !== rendered.width || canvas.height !== rendered.height) {
+    canvas.width = rendered.width;
+    canvas.height = rendered.height;
+  }
+  ctx.drawImage(rendered, 0, 0);
+  scrub.value = String(Math.floor(timeSecs * 10));
+  scrubTime.textContent = formatTime(timeSecs);
+}
+
 async function startRender(): Promise<void> {
   if (!state.videoFile || !state.osd) return;
   const font = await ensureSizedFont();
@@ -281,6 +298,7 @@ async function startRender(): Promise<void> {
       (stage) => {
         renderStatus.textContent = stage;
       },
+      showRenderedFrame,
     );
     renderStatus.textContent = `Done: ${sink.description}`;
     progressBar.value = 1;
