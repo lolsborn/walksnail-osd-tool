@@ -2,7 +2,7 @@
 // The preview decodes with a plain <video> element so it works in every browser; the render
 // pipeline (WebCodecs) comes in milestone 2.
 
-import { canPickSaveLocation, openDownloadSink, openFileSink } from "./codec/output";
+import { openBestSink } from "./codec/output";
 import { DEFAULT_RENDER_SETTINGS, Renderer, webCodecsAvailable } from "./codec/render";
 import { DEFAULT_OSD_OPTIONS, drawOsd, drawSrt, type OsdOptions } from "./compositor/canvas2d";
 import { characterSizeForVideoHeight, loadFontFile, resizeFont, type FontFile } from "./parsers/font";
@@ -252,7 +252,7 @@ async function startRender(): Promise<void> {
   const font = await ensureSizedFont();
   if (!font) return;
   const outputName = state.videoFile.name.replace(/\.mp4$/i, "") + "_with_osd.mp4";
-  const sink = canPickSaveLocation() ? await openFileSink(outputName) : openDownloadSink(outputName);
+  const sink = await openBestSink(outputName);
   if (!sink) return; // cancelled the file picker
 
   renderer = new Renderer();
@@ -282,7 +282,7 @@ async function startRender(): Promise<void> {
         renderStatus.textContent = stage;
       },
     );
-    renderStatus.textContent = `Done: ${outputName}`;
+    renderStatus.textContent = `Done: ${sink.description}`;
     progressBar.value = 1;
   } catch (err) {
     renderStatus.textContent = (err as Error).message;

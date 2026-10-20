@@ -109,9 +109,10 @@ export class Renderer {
     const muxer = new Muxer({
       target: inputs.sink.target,
       video: { codec: "avc", width: video.width, height: video.height, frameRate: video.frameRate },
-      // The index goes at the end so the output streams to disk; "in-memory" would hold the
-      // whole file in RAM until the end.
-      fastStart: false,
+      // A seekable destination gets a regular MP4 with the index at the end ("in-memory" would
+      // hold the whole file in RAM). A non-seekable one gets a fragmented MP4, which is written
+      // strictly in order.
+      fastStart: inputs.sink.seekable ? false : "fragmented",
       firstTimestampBehavior: "offset",
     });
 
