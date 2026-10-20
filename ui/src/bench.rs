@@ -3,7 +3,7 @@
 //!
 //! Usage:
 //!   walksnail-osd-tool --bench --video <path> [--osd <path>] [--font <path>] [--srt <path>]
-//!                      [--encoder <name>] [--bitrate <mbps>] [--output <path>]
+//!                      [--encoder <name>] [--bitrate <mbps>] [--output <path>] [--gpu]
 //!
 //! OSD and SRT default to the files next to the video. The font defaults to the one saved in the
 //! app config. OSD and SRT options come from the app config so results match GUI renders.
@@ -88,6 +88,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
 
     let mut render_settings = config.render_options.clone();
     render_settings.encoder = encoder;
+    render_settings.use_gpu = args.iter().any(|a| a == "--gpu");
     if let Some(bitrate) = get("--bitrate") {
         render_settings.bitrate_mbps = bitrate.parse().map_err(|_| "--bitrate must be a number")?;
     }
@@ -100,7 +101,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
 
     println!(
-        "BENCH start video={} ({}x{} @ {} fps, {} frames) encoder={} bitrate={}M srt={} output={}",
+        "BENCH start video={} ({}x{} @ {} fps, {} frames) encoder={} bitrate={}M gpu={} srt={} output={}",
         file_name(&video_path),
         video_info.width,
         video_info.height,
@@ -108,6 +109,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         video_info.total_frames,
         render_settings.encoder.name,
         render_settings.bitrate_mbps,
+        render_settings.use_gpu,
         srt_file.is_some(),
         output_path.display(),
     );

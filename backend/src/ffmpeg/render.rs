@@ -15,6 +15,7 @@ use ffmpeg_sidecar::{
 use super::{render_settings::RenderSettings, Encoder, FromFfmpegMessage, ToFfmpegMessage, VideoInfo};
 use crate::{
     font,
+    gpu::GpuCompositor,
     osd::{self, OsdOptions},
     overlay::{get_character_size, FrameCompositor, RenderTimings},
     srt::{self, SrtOptions},
@@ -58,6 +59,21 @@ pub fn start_video_render(
     // Resize the font to the video's character size once, instead of on every glyph of every frame
     let font_file = font_file.resized(&get_character_size(video_info.height));
 
+    let gpu = if render_settings.use_gpu {
+        match GpuCompositor::new(video_info.width, video_info.height, &font_file) {
+            Ok(gpu) => {
+                tracing::info!("Compositing on the GPU ({})", gpu.adapter_name());
+                Some(gpu)
+            }
+            Err(e) => {
+                tracing::warn!("GPU compositing unavailable, falling back to the CPU: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut compositor = FrameCompositor::new(
         osd_frames,
         srt_frames,
@@ -70,6 +86,7 @@ pub fn start_video_render(
         } else {
             None
         },
+        gpu,
     );
 
     // The render is a three stage pipeline: decoder reader -> compositor -> encoder writer.

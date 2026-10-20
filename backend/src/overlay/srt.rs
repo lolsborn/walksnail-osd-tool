@@ -3,13 +3,11 @@ use imageproc::drawing::draw_text_mut;
 
 use crate::srt::{SrtFrameData, SrtOptions};
 
-#[inline]
-pub fn overlay_srt_data(
-    image: &mut RgbaImage,
-    srt_data: &SrtFrameData,
-    font: &rusttype::Font,
-    srt_options: &SrtOptions,
-) {
+/// Color the SRT text is drawn with.
+pub const SRT_TEXT_COLOR: Rgba<u8> = Rgba([240u8, 240u8, 240u8, 10u8]);
+
+/// The text line rendered for an SRT record with the given options.
+pub fn srt_text(srt_data: &SrtFrameData, srt_options: &SrtOptions) -> String {
     let time_str = if srt_options.show_time {
         let minutes = srt_data.flight_time / 60;
         let seconds = srt_data.flight_time % 60;
@@ -60,19 +58,32 @@ pub fn overlay_srt_data(
         "".into()
     };
 
-    let srt_string = format!("{time_str}{sbat_str}{gbat_str}{signal_str}{latency_str}{bitrate_str}{distance_str}");
+    format!("{time_str}{sbat_str}{gbat_str}{signal_str}{latency_str}{bitrate_str}{distance_str}")
+}
 
-    let image_dimensions = image.dimensions();
+/// Pixel position and font scale of the SRT text for a frame of the given size.
+pub fn srt_layout(srt_options: &SrtOptions, width: u32, height: u32) -> (i32, i32, f32) {
+    let x_pos = srt_options.position.x / 100.0 * width as f32;
+    let y_pos = srt_options.position.y / 100.0 * height as f32;
+    let scale = srt_options.scale / 1080.0 * height as f32;
+    (x_pos as i32, y_pos as i32, scale)
+}
 
-    let x_pos = srt_options.position.x / 100.0 * image_dimensions.0 as f32;
-    let y_pos = srt_options.position.y / 100.0 * image_dimensions.1 as f32;
-    let scale = srt_options.scale / 1080.0 * image_dimensions.1 as f32;
+#[inline]
+pub fn overlay_srt_data(
+    image: &mut RgbaImage,
+    srt_data: &SrtFrameData,
+    font: &rusttype::Font,
+    srt_options: &SrtOptions,
+) {
+    let srt_string = srt_text(srt_data, srt_options);
+    let (x_pos, y_pos, scale) = srt_layout(srt_options, image.width(), image.height());
 
     draw_text_mut(
         image,
-        Rgba([240u8, 240u8, 240u8, 10u8]),
-        x_pos as i32,
-        y_pos as i32,
+        SRT_TEXT_COLOR,
+        x_pos,
+        y_pos,
         rusttype::Scale::uniform(scale),
         font,
         &srt_string,

@@ -108,6 +108,13 @@ h264 is capped by the encoder path itself. hevc with `-prio_speed 1` is 1.6x fas
 than anything else through ffmpeg, so it is now added to the hevc_videotoolbox
 encoder's extra args and is the encoder to measure with from here on.
 
+## Automated benchmark protocol (from 2026-10-19)
+
+`walksnail-osd-tool --bench --video <mp4> --encoder <name> --output <local path>`
+(see ui/src/bench.rs). Scratchpad `bench.sh <label> <encoder...>` runs it and appends
+to `results.log`. Input and output are on the local SSD: reading from the SMB share
+and writing the 1 GB output back to it cost ~50 fps (160 -> 210 with h264).
+
 ## Direction: full wgpu render pipeline, built incrementally
 
 Goal: decode -> composite -> encode with frames staying on the GPU. Each stage
@@ -149,7 +156,14 @@ of the GPU compositor because the overlay was <10% of frame time.
 - Expected: compositing cost drops a lot, but upload/readback latency caps the gain
   until stage 2.
 
-### Stage 2: keep several frames in flight
+Stage 2 outcome (2026-10-19): `backend/src/gpu/` with a headless wgpu context, font
+atlas (16 columns), instanced glyph quads, CPU-rasterized SRT strip, `over` blending,
+synchronous readback. `RenderSettings::use_gpu` toggles it (UI checkbox, `--gpu` in
+bench). Three parity tests vs the CPU path (OSD, chroma key, SRT text) pass within
+rounding. Found a CPU-path artifact: imageproc does not clamp rusttype coverage, so
+overlapping glyph contours render white instead of the text color on the CPU.
+
+### Stage 2b: keep several frames in flight
 
 - Ring of N staging buffers and textures (N = 3 or 4). Submit frame k while frame
   k-1 is executing and frame k-2 is being mapped for readback.
@@ -231,7 +245,10 @@ pipe: fewer bytes (NV12 is 2.7x smaller than RGBA) and no swscale on the encoder
 side, i.e. stage 3's format work, or removing the pipe entirely (stage 4).
 
 | 1b    | Frame buffers 4 -> 8, h264_videotoolbox | 160.6 | 2.68x | Longer clip (18060 frames, 112.5 s). Writer idle 11% -> 3.6%, write 6.0 ms/frame |
-| 2     | GPU composite, CPU round trip (infrastructure, parity test) |     |       |       |
+| 1c    | Same build, headless bench, local SSD in/out, h264_videotoolbox | 209.7 | 3.50x | 62.2 s. At the ffmpeg h264 ceiling: writer 99.9% blocked on encoder |
+| 1c    | Same build, headless bench, local SSD in/out, hevc_videotoolbox -prio_speed | 268.8 | 4.48x | 48.5 s. Bottleneck flipped: reader waits 3.7 ms/frame on the decoder pipe |
+| 2     | GPU composite (wgpu/Metal), CPU round trip, hevc_videotoolbox | 258.4 | 4.31x | 50.5 s. Composite 2.9 ms/frame (CPU was 0.65) but hidden behind the decoder (3.8 ms). Parity tests pass |
+| 2     | Same, h264_videotoolbox              | 209.5 | 3.49x | Unchanged, at the ffmpeg h264 ceiling |
 | 2b    | GPU frames in flight                 |     |       |       |
 | 3     | YUV pipes + hwaccel decode           |     |       |       |
 | 4     | Zero-copy VideoToolbox (macOS)       |     |       |       |

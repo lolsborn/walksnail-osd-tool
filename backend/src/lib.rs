@@ -4,6 +4,7 @@
 pub mod config;
 pub mod ffmpeg;
 pub mod font;
+pub mod gpu;
 pub mod osd;
 pub mod overlay;
 pub mod srt;

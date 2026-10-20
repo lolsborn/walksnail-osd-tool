@@ -11,6 +11,9 @@ pub struct RenderSettings {
     pub upscale: bool,
     pub use_chroma_key: bool,
     pub chroma_key: [f32; 3],
+    /// Draw the overlays on the GPU (wgpu) instead of the CPU.
+    #[serde(default)]
+    pub use_gpu: bool,
 }
 
 impl Default for RenderSettings {
@@ -41,6 +44,7 @@ impl Default for RenderSettings {
             upscale: false,
             use_chroma_key: false,
             chroma_key: [1.0 / 255.0, 177.0 / 255.0, 64.0 / 255.0],
+            use_gpu: false,
         }
     }
 }

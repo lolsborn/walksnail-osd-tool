@@ -387,6 +387,10 @@ impl WalksnailOsdTool {
                             changed |= ui.color_edit_button_rgb(&mut self.render_settings.chroma_key).changed();
                         });
                         ui.end_row();
+
+                        ui.label("GPU compositing").on_hover_text(tooltip_text("Draw the OSD and SRT data on the GPU (experimental). Falls back to the CPU if no compatible GPU is found."));
+                        changed |= ui.add(Checkbox::without_text(&mut self.render_settings.use_gpu)).changed();
+                        ui.end_row();
                     });
             });
 

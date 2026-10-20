@@ -66,6 +66,23 @@ impl FontFile {
         }
     }
 
+    /// Number of character images in this font (characters per page times pages).
+    pub fn num_characters(&self) -> usize {
+        self.characters.len()
+    }
+
+    /// Build a font from in-memory character images, for tests.
+    #[cfg(test)]
+    pub(crate) fn from_characters(characters: Vec<RgbaImage>, size: CharacterSize) -> Self {
+        Self {
+            file_path: PathBuf::from("synthetic.png"),
+            character_count: characters.len() as u32,
+            character_size: size,
+            font_type: FontType::Standard,
+            characters,
+        }
+    }
+
     fn matches_size(&self, size: &CharacterSize) -> bool {
         size.width() == self.character_size.width() && size.height() == self.character_size.height()
     }
