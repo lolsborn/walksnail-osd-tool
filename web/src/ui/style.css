@@ -8,7 +8,7 @@
 }
 body {
   margin: 0 auto;
-  max-width: 1200px;
+  max-width: 1400px;
   padding: 16px;
 }
 header h1 {
@@ -21,25 +21,62 @@ header h1 {
 }
 main {
   display: grid;
-  gap: 16px;
-  grid-template-columns: 1fr;
+  gap: 24px;
+  grid-template-columns: minmax(260px, 320px) 1fr;
+  align-items: start;
 }
-.files {
+@media (max-width: 800px) {
+  main {
+    grid-template-columns: 1fr;
+  }
+}
+.pane {
   display: grid;
-  gap: 8px;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
 }
-.files label {
-  display: flex;
-  flex-direction: column;
+.field {
+  display: grid;
   gap: 4px;
   font-size: 0.9rem;
 }
+.field span {
+  font-weight: 600;
+}
+.field small {
+  opacity: 0.7;
+}
+.field select {
+  font: inherit;
+  padding: 4px;
+}
 .info {
-  grid-column: 1 / -1;
   font-size: 0.85rem;
   white-space: pre-line;
   opacity: 0.9;
+  min-height: 1.2em;
+}
+.advanced summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+.advanced fieldset {
+  border: 1px solid #8884;
+  border-radius: 4px;
+  margin-top: 8px;
+}
+.advanced label {
+  display: block;
+  margin: 4px 0;
+  font-size: 0.9rem;
+}
+.advanced input[type="number"] {
+  width: 6em;
+}
+.toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
 }
 .preview canvas {
   width: 100%;
@@ -56,26 +93,4 @@ main {
 }
 .controls input[type="range"] {
   flex: 1;
-}
-.settings {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-}
-fieldset {
-  border: 1px solid #8884;
-  border-radius: 4px;
-}
-fieldset label {
-  display: block;
-  margin: 4px 0;
-  font-size: 0.9rem;
-}
-fieldset input[type="number"] {
-  width: 6em;
-}
-.toggles {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 16px;
 }

@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "description": "Walksnail OSD Tool in the browser. All processing happens locally; files never leave the computer.",
+  "authors": ["Alexander van Saase", "Steven L Osborn"],
+  "license": "GPL-3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

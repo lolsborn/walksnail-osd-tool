@@ -67,9 +67,9 @@ export interface FontFile {
   size: CharacterSize;
 }
 
-/** Load a font PNG into individual character bitmaps. Browser only. */
-export async function loadFontFile(blob: Blob): Promise<FontFile> {
-  const image = await createImageBitmap(blob);
+/** Load a font PNG (a Blob, Image or ImageBitmap) into individual character bitmaps. Browser only. */
+export async function loadFontFile(source: ImageBitmapSource): Promise<FontFile> {
+  const image = await createImageBitmap(source);
   const dimensions = detectDimensions(image.width, image.height);
   const { width, height } = CHARACTER_SIZES[dimensions.size];
   const characters: ImageBitmap[] = [];

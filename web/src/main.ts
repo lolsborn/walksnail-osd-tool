@@ -1,4 +1,4 @@
-// Milestone 1: load the four files, show a composited preview at any point in the video.
+// Milestone 1: pick the flight files, choose a provided OSD font, preview any point in the video.
 // The preview decodes with a plain <video> element so it works in every browser; the render
 // pipeline (WebCodecs) comes in milestone 2.
 
@@ -18,6 +18,14 @@ const canvas = el<HTMLCanvasElement>("preview");
 const scrub = el<HTMLInputElement>("scrub");
 const scrubTime = el<HTMLSpanElement>("scrub-time");
 const info = el<HTMLDivElement>("file-info");
+const fontSelect = el<HTMLSelectElement>("font-select");
+const srtOptionsPanel = el<HTMLFieldSetElement>("srt-options");
+
+interface ProvidedFont {
+  id: string;
+  name: string;
+  file: string;
+}
 
 interface State {
   videoFile?: File;
@@ -45,19 +53,11 @@ function formatTime(secs: number): string {
 function updateInfo(): void {
   const lines: string[] = [];
   if (state.videoFile && state.videoDuration !== undefined) {
-    lines.push(`Video: ${state.videoFile.name}, ${video.videoWidth}x${video.videoHeight}, ${formatTime(state.videoDuration)}`);
+    lines.push(`${state.videoFile.name}: ${video.videoWidth}x${video.videoHeight}, ${formatTime(state.videoDuration)}`);
   }
-  if (state.osd) {
-    lines.push(`OSD: ${state.osd.fcFirmware}, ${state.osd.frameCount} frames, ${formatTime(state.osd.durationSecs)}`);
-  }
-  if (state.srt) {
-    lines.push(`SRT: ${state.srt.frames.length} entries, ${formatTime(state.srt.durationSecs)}`);
-  }
-  if (state.font) {
-    const d = state.font.dimensions;
-    lines.push(`Font: ${d.characterCount} characters, ${d.type}, native size ${state.font.size}`);
-  }
+  if (state.videoFile && !state.osd) lines.push("No .osd file selected yet.");
   info.textContent = lines.join("\n");
+  srtOptionsPanel.hidden = !state.srt;
 }
 
 function playbackSpeedFactor(): number {
@@ -106,14 +106,77 @@ async function drawPreview(): Promise<void> {
   }
 }
 
-// --- File loading ---
+// --- Provided OSD fonts ---
 
-el<HTMLInputElement>("video-file").addEventListener("change", (e) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  state.videoFile = file;
-  if (video.src) URL.revokeObjectURL(video.src);
-  video.src = URL.createObjectURL(file);
+async function loadProvidedFont(file: string): Promise<FontFile> {
+  // Load through an <img> so the page needs no fetch permissions beyond its own images
+  const image = new Image();
+  image.src = `${import.meta.env.BASE_URL}osd-fonts/${file}`;
+  await image.decode();
+  return loadFontFile(image);
+}
+
+async function selectFont(font: ProvidedFont): Promise<void> {
+  try {
+    state.font = await loadProvidedFont(font.file);
+    state.sizedFont = undefined;
+  } catch (err) {
+    alert(`Could not load the ${font.name} font: ${(err as Error).message}`);
+    return;
+  }
+  void drawPreview();
+}
+
+async function initFonts(): Promise<void> {
+  const response = await fetch(`${import.meta.env.BASE_URL}osd-fonts/fonts.json`);
+  const fonts = (await response.json()) as ProvidedFont[];
+  fontSelect.replaceChildren(
+    ...fonts.map((f) => {
+      const option = document.createElement("option");
+      option.value = f.id;
+      option.textContent = f.name;
+      return option;
+    }),
+  );
+  fontSelect.addEventListener("change", () => {
+    const font = fonts.find((f) => f.id === fontSelect.value);
+    if (font) void selectFont(font);
+  });
+  if (fonts[0]) await selectFont(fonts[0]);
+}
+
+// --- Flight files ---
+
+async function addFlightFiles(files: Iterable<File>): Promise<void> {
+  for (const file of files) {
+    const ext = file.name.toLowerCase().split(".").pop();
+    try {
+      if (ext === "mp4" || file.type === "video/mp4") {
+        state.videoFile = file;
+        if (video.src) URL.revokeObjectURL(video.src);
+        video.src = URL.createObjectURL(file);
+      } else if (ext === "osd") {
+        state.osd = parseOsdFile(new Uint8Array(await file.arrayBuffer()));
+      } else if (ext === "srt") {
+        state.srt = parseSrtFile(await file.text());
+      }
+    } catch (err) {
+      alert(`Could not read ${file.name}: ${(err as Error).message}`);
+    }
+  }
+  updateInfo();
+  void drawPreview();
+}
+
+el<HTMLInputElement>("flight-files").addEventListener("change", (e) => {
+  const files = (e.target as HTMLInputElement).files;
+  if (files) void addFlightFiles(files);
+});
+
+document.body.addEventListener("dragover", (e) => e.preventDefault());
+document.body.addEventListener("drop", (e) => {
+  e.preventDefault();
+  if (e.dataTransfer?.files) void addFlightFiles(e.dataTransfer.files);
 });
 
 video.addEventListener("loadedmetadata", () => {
@@ -132,47 +195,7 @@ scrub.addEventListener("input", () => {
   video.currentTime = Number(scrub.value) / 10;
 });
 
-el<HTMLInputElement>("osd-file").addEventListener("change", async (e) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  try {
-    state.osd = parseOsdFile(new Uint8Array(await file.arrayBuffer()));
-  } catch (err) {
-    alert(`Could not read OSD file: ${(err as Error).message}`);
-    return;
-  }
-  updateInfo();
-  void drawPreview();
-});
-
-el<HTMLInputElement>("srt-file").addEventListener("change", async (e) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  try {
-    state.srt = parseSrtFile(await file.text());
-  } catch (err) {
-    alert(`Could not read SRT file: ${(err as Error).message}`);
-    return;
-  }
-  updateInfo();
-  void drawPreview();
-});
-
-el<HTMLInputElement>("font-file").addEventListener("change", async (e) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  try {
-    state.font = await loadFontFile(file);
-    state.sizedFont = undefined;
-  } catch (err) {
-    alert(`Could not read font file: ${(err as Error).message}`);
-    return;
-  }
-  updateInfo();
-  void drawPreview();
-});
-
-// --- Settings ---
+// --- Advanced settings ---
 
 function bindNumber(id: string, apply: (v: number) => void): void {
   const input = el<HTMLInputElement>(id);
@@ -204,5 +227,4 @@ bindCheckbox("srt-latency", (v) => (state.srtOptions.showLatency = v));
 bindCheckbox("srt-bitrate", (v) => (state.srtOptions.showBitrate = v));
 bindCheckbox("srt-distance", (v) => (state.srtOptions.showDistance = v));
 
-// Make sure the SRT font is loaded before the first text draw
-void document.fonts.load(`35px AzeretMono`).then(() => void drawPreview());
+void Promise.all([initFonts(), document.fonts.load("35px AzeretMono")]).then(() => void drawPreview());
