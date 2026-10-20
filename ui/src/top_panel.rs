@@ -104,8 +104,12 @@ impl WalksnailOsdTool {
                     ui.add_space(10.0);
 
                     egui::Grid::new("about").spacing(vec2(10.0, 5.0)).show(ui, |ui| {
-                        ui.label("Author:");
+                        ui.label("Authors:");
                         ui.label("Alexander van Saase");
+                        ui.end_row();
+
+                        ui.label("");
+                        ui.label("Steven L Osborn");
                         ui.end_row();
 
                         ui.label("Version:");
