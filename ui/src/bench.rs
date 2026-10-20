@@ -4,6 +4,7 @@
 //! Usage:
 //!   walksnail-osd-tool --bench --video <path> [--osd <path>] [--font <path>] [--srt <path>]
 //!                      [--encoder <name>] [--bitrate <mbps>] [--output <path>] [--gpu [rgba|nv12]]
+//!                      [--upscale] [--chroma-key]
 //!
 //! OSD and SRT default to the files next to the video. The font defaults to the one saved in the
 //! app config. OSD and SRT options come from the app config so results match GUI renders.
@@ -95,6 +96,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
             _ => GpuMode::Rgba,
         },
     };
+    render_settings.upscale = args.iter().any(|a| a == "--upscale");
+    render_settings.use_chroma_key = args.iter().any(|a| a == "--chroma-key");
     if let Some(bitrate) = get("--bitrate") {
         render_settings.bitrate_mbps = bitrate.parse().map_err(|_| "--bitrate must be a number")?;
     }
@@ -107,7 +110,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     };
 
     println!(
-        "BENCH start video={} ({}x{} @ {} fps, {} frames) encoder={} bitrate={}M gpu={:?} srt={} output={}",
+        "BENCH start video={} ({}x{} @ {} fps, {} frames) encoder={} bitrate={}M gpu={:?} upscale={} chroma_key={} srt={} output={}",
         file_name(&video_path),
         video_info.width,
         video_info.height,
@@ -116,6 +119,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
         render_settings.encoder.name,
         render_settings.bitrate_mbps,
         render_settings.gpu_mode,
+        render_settings.upscale,
+        render_settings.use_chroma_key,
         srt_file.is_some(),
         output_path.display(),
     );

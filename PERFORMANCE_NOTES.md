@@ -192,6 +192,29 @@ With hevc the pipeline is now encoder-bound at ffmpeg's VideoToolbox ceiling.
 - Upscale: render to a 2560x1440 target instead of ffmpeg `-vf scale`.
 - Expected: large win at 4K where pipe/copy bandwidth dominates.
 
+### VideoToolbox hardware ceiling (Swift spike, 2026-10-19)
+
+Scratchpad `vtspike/bench_vt.swift`: AVAssetReader hardware decode to NV12 and
+VTCompressionSession encode fed directly with the decoded CVPixelBuffers, no ffmpeg,
+no copies. 3000 frames of the test clip, 40 Mbps, speed prioritized.
+
+| Path                                   | fps    |
+|----------------------------------------|--------|
+| VT decode only                         | 1823   |
+| VT encode only, HEVC                   | 318.7  |
+| VT encode only, H.264                  | 207.0  |
+| VT decode + encode streamed, HEVC      | 317.8  |
+| VT decode + encode streamed, H.264     | 206.9  |
+
+These equal the ffmpeg ceilings (321 / 207). ffmpeg's wrapper adds nothing; the
+Apple M3 Pro media engine's encoder is the limit. Stage 3 at 313.5 fps is at 98% of
+it, so stage 4 (in-process VideoToolbox) cannot improve 1080p throughput on this
+machine and is not worth building for speed. It would still remove the ffmpeg
+dependency and the pipe copies, but that is a packaging/architecture benefit.
+
+Validation renders on a 10 s clip in NV12 GPU mode (frames inspected): SRT text,
+chroma key and 1440p upscale all render correctly.
+
 ### Stage 4: zero-copy on macOS (frames never leave the GPU)
 
 - Replace the ffmpeg decoder process with in-process VideoToolbox decode
