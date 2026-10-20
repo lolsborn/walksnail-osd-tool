@@ -9,16 +9,20 @@ use crossbeam_channel::{Receiver, Sender};
 use ffmpeg_sidecar::{
     child::FfmpegChild,
     command::FfmpegCommand,
-    event::{FfmpegEvent, LogLevel},
+    event::{FfmpegEvent, LogLevel, OutputVideoFrame},
 };
 
 use super::{render_settings::RenderSettings, Encoder, FromFfmpegMessage, ToFfmpegMessage, VideoInfo};
 use crate::{
     font,
     osd::{self, OsdOptions},
-    overlay::{get_character_size, FrameOverlayIter},
+    overlay::{get_character_size, FrameCompositor, RenderTimings},
     srt::{self, SrtOptions},
 };
+
+/// Number of frames that may be buffered between each pair of pipeline stages. Each frame is
+/// width * height * 4 bytes (8 MB at 1080p, 33 MB at 4K), so keep this small.
+const FRAME_BUFFER_LEN: usize = 4;
 
 #[tracing::instrument(skip(osd_frames, srt_frames, font_file), err)]
 pub fn start_video_render(
@@ -47,27 +51,20 @@ pub fn start_video_render(
         render_settings.upscale,
     )?;
 
-    // Channels to communicate with ffmpeg handler thread
+    // Channels to communicate with ffmpeg handler threads
     let (from_ffmpeg_tx, from_ffmpeg_rx) = crossbeam_channel::unbounded();
     let (to_ffmpeg_tx, to_ffmpeg_rx) = crossbeam_channel::unbounded();
 
     // Resize the font to the video's character size once, instead of on every glyph of every frame
     let font_file = font_file.resized(&get_character_size(video_info.height));
 
-    // Iterator over decoded video and OSD frames
-    let frame_overlay_iter = FrameOverlayIter::new(
-        decoder_process
-            .iter()
-            .expect("Failed to create `FfmpegIterator` for decoder"),
-        decoder_process,
+    let mut compositor = FrameCompositor::new(
         osd_frames,
         srt_frames,
         font_file,
         srt_font,
         osd_options,
         srt_options,
-        from_ffmpeg_tx.clone(),
-        to_ffmpeg_rx,
         if render_settings.use_chroma_key {
             Some(render_settings.chroma_key)
         } else {
@@ -75,22 +72,98 @@ pub fn start_video_render(
         },
     );
 
-    // On another thread run the decoder iterator to completion and feed the output to the encoder's stdin
-    let mut encoder_stdin = encoder_process.take_stdin().expect("Failed to get `stdin` for encoder");
+    // The render is a three stage pipeline: decoder reader -> compositor -> encoder writer.
+    // The stages are decoupled by bounded channels so that the two ffmpeg processes and the
+    // compositing work overlap instead of running in lockstep (OS pipe buffers are far smaller
+    // than one video frame, so without this every stage waits on the others).
+    let (decoded_tx, decoded_rx) = crossbeam_channel::bounded::<OutputVideoFrame>(FRAME_BUFFER_LEN);
+    let (composited_tx, composited_rx) = crossbeam_channel::bounded::<OutputVideoFrame>(FRAME_BUFFER_LEN);
+
+    let decoder_iter = decoder_process
+        .iter()
+        .expect("Failed to create `FfmpegIterator` for decoder");
+    let decoder_events_tx = from_ffmpeg_tx.clone();
     thread::Builder::new()
-        .name("Decoder handler".into())
+        .name("Decoder reader".into())
         .spawn(move || {
-            tracing::info_span!("Decoder handler thread").in_scope(|| {
-                let mut frame_overlay_iter = frame_overlay_iter;
-                while let Some(frame) = frame_overlay_iter.next() {
-                    let write_start = Instant::now();
-                    encoder_stdin.write_all(&frame.data).ok();
-                    frame_overlay_iter.record_encoder_write(write_start.elapsed());
+            tracing::info_span!("Decoder reader thread").in_scope(|| {
+                let mut timings = RenderTimings::default();
+                let mut wait_start = Instant::now();
+                for event in decoder_iter {
+                    // On every event check if the render should be stopped
+                    while let Ok(ToFfmpegMessage::AbortRender) = to_ffmpeg_rx.try_recv() {
+                        decoder_process
+                            .quit()
+                            .map_err(|e| tracing::warn!("Failed to send quit to decoder: {e}"))
+                            .ok();
+                    }
+                    match event {
+                        FfmpegEvent::OutputFrame(frame) => {
+                            timings.decoder_wait += wait_start.elapsed();
+                            timings.frames += 1;
+                            let send_start = Instant::now();
+                            if decoded_tx.send(frame).is_err() {
+                                // Compositor is gone, stop reading
+                                break;
+                            }
+                            timings.output_wait += send_start.elapsed();
+                            wait_start = Instant::now();
+                        }
+                        other_event => handle_decoder_events(other_event, &decoder_events_tx),
+                    }
                 }
-                frame_overlay_iter.timings().log_summary();
+                timings.log_summary("decoder reader");
             });
         })
-        .expect("Failed to spawn decoder handler thread");
+        .expect("Failed to spawn decoder reader thread");
+
+    thread::Builder::new()
+        .name("Compositor".into())
+        .spawn(move || {
+            tracing::info_span!("Compositor thread").in_scope(|| {
+                loop {
+                    let wait_start = Instant::now();
+                    let Ok(frame) = decoded_rx.recv() else { break };
+                    compositor.timings_mut().decoder_wait += wait_start.elapsed();
+
+                    let frame = compositor.composite(frame);
+
+                    let send_start = Instant::now();
+                    if composited_tx.send(frame).is_err() {
+                        break;
+                    }
+                    compositor.timings_mut().output_wait += send_start.elapsed();
+                }
+                compositor.timings().log_summary("compositor");
+            });
+        })
+        .expect("Failed to spawn compositor thread");
+
+    // Feed composited frames to the encoder's stdin. Dropping the stdin handle when the channel
+    // closes signals EOF to the encoder.
+    let mut encoder_stdin = encoder_process.take_stdin().expect("Failed to get `stdin` for encoder");
+    thread::Builder::new()
+        .name("Encoder writer".into())
+        .spawn(move || {
+            tracing::info_span!("Encoder writer thread").in_scope(|| {
+                let mut timings = RenderTimings::default();
+                loop {
+                    let wait_start = Instant::now();
+                    let Ok(frame) = composited_rx.recv() else { break };
+                    timings.decoder_wait += wait_start.elapsed();
+                    timings.frames += 1;
+
+                    let write_start = Instant::now();
+                    if encoder_stdin.write_all(&frame.data).is_err() {
+                        tracing::warn!("Failed to write frame to encoder, stopping");
+                        break;
+                    }
+                    timings.encoder_write += write_start.elapsed();
+                }
+                timings.log_summary("encoder writer");
+            });
+        })
+        .expect("Failed to spawn encoder writer thread");
 
     // On yet another thread run the encoder to completion
     thread::Builder::new()

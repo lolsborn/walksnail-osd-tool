@@ -125,7 +125,10 @@ mod tests {
         let font = synthetic_font(CharacterSize::Large);
         let character = font.get_character(1, &CharacterSize::Large).unwrap();
         assert!(matches!(character, Cow::Borrowed(_)));
-        assert_eq!(character.dimensions(), (CharacterSize::Large.width(), CharacterSize::Large.height()));
+        assert_eq!(
+            character.dimensions(),
+            (CharacterSize::Large.width(), CharacterSize::Large.height())
+        );
     }
 
     #[test]
@@ -133,7 +136,10 @@ mod tests {
         let font = synthetic_font(CharacterSize::Large);
         let character = font.get_character(1, &CharacterSize::Small).unwrap();
         assert!(matches!(character, Cow::Owned(_)));
-        assert_eq!(character.dimensions(), (CharacterSize::Small.width(), CharacterSize::Small.height()));
+        assert_eq!(
+            character.dimensions(),
+            (CharacterSize::Small.width(), CharacterSize::Small.height())
+        );
     }
 
     #[test]
@@ -144,7 +150,10 @@ mod tests {
         assert_eq!(font.characters.len(), 3);
         let character = font.get_character(2, &CharacterSize::Ultra).unwrap();
         assert!(matches!(character, Cow::Borrowed(_)));
-        assert_eq!(character.dimensions(), (CharacterSize::Ultra.width(), CharacterSize::Ultra.height()));
+        assert_eq!(
+            character.dimensions(),
+            (CharacterSize::Ultra.width(), CharacterSize::Ultra.height())
+        );
         // Solid-color input must stay solid after resizing
         assert_eq!(character.get_pixel(10, 10), &Rgba([2, 2, 2, 255]));
     }

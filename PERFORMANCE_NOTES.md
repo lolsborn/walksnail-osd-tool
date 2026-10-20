@@ -9,9 +9,12 @@ the `optional-srt` branch with the `macos-app-bundle` feature and bundled ffmpeg
 |----------|------|--------|-----------------------------------------|
 | Baseline | 65.0 | 1.090x | Unmodified pipeline, software decode    |
 
-Fill in for the baseline: input resolution/framerate, encoder selected
-(libx264 / libx265 / h264_videotoolbox / hevc_videotoolbox), bitrate, upscale on/off.
-Re-use the same input file and settings for every run so numbers are comparable.
+Test input and settings (use these for every run):
+
+- Input: AvatarS0098.mp4, 1920x1080 @ 60 fps, 217 s, 13035 frames, ~51 Mbps
+- Encoder: libx264 (software), upscale off, chroma key off
+- OSD font at native 1080p size (so the glyph cache mostly removes clones, not resizes)
+- SRT: signal/latency/bitrate/distance shown, time/battery hidden
 
 ## Pipeline today
 
@@ -29,10 +32,41 @@ Compositing is the serial stage and the expected bottleneck.
 - The fps/speed shown in the app come from ffmpeg's encoder progress.
 - Since stage 0 the compositing thread logs a per-stage breakdown at the end of
   every render (also on abort). Read it from the log file:
-  `~/Library/Application Support/walksnail-osd-tool/walksnail-osd-tool.log`
+  `~/Library/Application Support/rs.walksnail-osd-tool/walksnail-osd-tool.log`
   Look for `Render timing summary` and the four `Render stage timing` lines
   (decoder wait, osd overlay, srt overlay, encoder write) with ms per frame and
   percent of the compositing thread's time. The log is reset on each app start.
+
+## ffmpeg micro-benchmarks (2026-10-19, bundled ffmpeg 6, 1080p, 2000 frames)
+
+Script: scratchpad `ffbench.sh`. Encode tests feed all-zero frames through a pipe,
+so encoder cost is a lower bound; conversion and pipe costs are representative.
+
+| Test                              | fps   | ms/frame |
+|-----------------------------------|-------|----------|
+| pipe rgba passthrough (no work)   | 416   | 2.4      |
+| swscale rgba -> yuv420p only      | 362   | 2.8      |
+| enc rgba -> h264_videotoolbox     | 215   | 4.7      |
+| enc nv12 -> h264_videotoolbox     | 213   | 4.7      |
+| enc rgba -> libx264 (zeros)       | 326   | 3.1      |
+| enc nv12 -> libx264 (zeros)       | 703   | 1.4      |
+| dec sw -> rgba (real clip)        | 654   | 1.5      |
+| dec sw -> nv12 (real clip)        | 726   | 1.4      |
+| dec -hwaccel videotoolbox -> nv12 | 170   | 5.9      |
+| dec -hwaccel videotoolbox -> rgba | 198   | 5.1      |
+
+Conclusions:
+- Reading or writing one 8 MB RGBA frame over a pipe costs ~2.4 ms by itself.
+- ffmpeg's h264_videotoolbox path tops out ~213 fps at 1080p regardless of input
+  pixel format; conversion overlaps with encoding inside ffmpeg.
+- Software decode is fast (650+ fps, multi-threaded). `-hwaccel videotoolbox`
+  through ffmpeg is 3-4x SLOWER when the output must come back over a pipe.
+  Dropped from the plan; hardware decode only pays off in-process (zero-copy stage).
+- The app's 8.4 ms/frame is roughly read (2.2) + composite (0.7) + write (5.5)
+  added together. macOS pipe buffers are 64 KB, far less than one frame, so the
+  decoder, the compositing thread and the encoder run in lockstep instead of
+  overlapping. Decoupling them with threads and a few frames of buffering should
+  bring per-frame time toward max(stage) ~ 5 ms (~190 fps) with no GPU work.
 
 ## Direction: full wgpu render pipeline, built incrementally
 
@@ -112,7 +146,31 @@ render the preview with the same shader, so preview and output are pixel-identic
 
 | Stage | Change                               | fps | speed | Notes |
 |-------|--------------------------------------|-----|-------|-------|
-| 0     | Timing + glyph cache + no copy       |     |       |       |
+| 0     | Timing + glyph cache + no copy, libx264 | 78.0 | 1.310x | UI figure, run aborted at 6514 frames. Thread: 54.6 fps |
+| 0     | Same build, h264_videotoolbox        | 77-99 | 1.290x | UI figure. Full run: 13035 frames in 109.1 s = 119.5 fps on the compositing thread |
+
+Stage 0 breakdown (ms per frame on the compositing thread, share of its time):
+
+| Stage          | libx264 (aborted) | h264_videotoolbox (full) |
+|----------------|-------------------|--------------------------|
+| decoder wait   | 0.84  (4.6%)      | 2.19 (26.1%)             |
+| osd overlay    | 2.08 (11.4%)      | 0.71  (8.5%)             |
+| srt overlay    | 0.00              | 0.00 (no .srt for this clip) |
+| encoder write  | 15.38 (84.0%)     | 5.47 (65.4%)             |
+
+Takeaways:
+- Swapping to the hardware encoder barely changed the UI fps. The "encoder write"
+  cost is dominated by pushing 8 MB RGBA frames through the pipe and ffmpeg's
+  software RGBA -> YUV conversion (log warns "No accelerated colorspace conversion
+  found"), not by encoding itself.
+- CPU compositing is ~0.7 ms/frame, ~8% of the thread. GPU compositing with a
+  synchronous round trip (stage 1 as planned) cannot speed this up on its own.
+- The win is in the pipes and color conversion (stage 3). Stage 1 stays as the
+  infrastructure step but its success criterion is pixel parity and no regression,
+  not fps.
+- Measurement protocol from here: h264_videotoolbox, let the render complete, and
+  use the summary's frames / total_secs rather than the UI's live number, which
+  fluctuates (77-99 observed for a 119.5 fps average).
 | 1     | GPU composite, CPU round trip        |     |       |       |
 | 2     | Frames in flight                     |     |       |       |
 | 3     | YUV pipes + hwaccel decode           |     |       |       |
