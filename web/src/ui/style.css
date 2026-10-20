@@ -89,6 +89,16 @@ main {
   flex-wrap: wrap;
   gap: 4px 16px;
 }
+footer {
+  margin-top: 32px;
+  padding-top: 12px;
+  border-top: 1px solid #8884;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
 .preview canvas {
   width: 100%;
   height: auto;

@@ -1,60 +1,51 @@
-<p align="center">
-<img width="256" height="176" src="https://user-images.githubusercontent.com/880421/224411816-c0cf1331-c856-42e9-a3d6-1c23b7da7886.png">
-</p>
-<h1 align="center">Walksnail OSD Tool</h1>
+# Walksnail OSD Tool, web edition
 
-[![Latest release](https://img.shields.io/github/v/release/avsaase/walksnail-osd-tool?include_prereleases&label=latest%20release)](https://github.com/avsaase/walksnail-osd-tool/releases/latest)
-[![Latest build](https://img.shields.io/github/last-commit/avsaase/walksnail-osd-tool/master?label=latest%20build)](https://nightly.link/avsaase/walksnail-osd-tool/workflows/release.yaml/master/walksnail-osd-tool-all-platforms.zip)
-[![Totally awesome](https://img.shields.io/badge/totally%20awesome-true-blue)](https://github.com/avsaase/walksnail-osd-tool)
+**Hosted at [https://osd.ronoth.com](https://osd.ronoth.com).**
 
-Cross-platform tool for rendering the flight controller OSD and SRT data from the Walksnail Avatar HD FPV system on top of the goggle or VRX recording.
+Burn the OSD and SRT telemetry of a Walksnail Avatar HD recording into the video, in your
+browser. Pick the `.mp4` and `.osd` from your goggles or VRX (and the `.srt` if you want the
+link telemetry), choose a font, check the preview, and render. The result is an H.264 MP4
+with the OSD drawn in, the same size and frame rate as the recording.
 
-![image](https://user-images.githubusercontent.com/880421/228286034-ffd7bf0d-4bb0-4774-9ee1-dd408bd97a88.png)
+Everything runs on your own computer. The files you pick are read by the page in your
+browser and the rendered video is written back to your disk. Nothing is uploaded: the page's
+Content Security Policy forbids it from opening any network connection after it has loaded,
+and there is no server side at all.
 
+## Based on the Walksnail OSD Tool
 
-## Features
-- Easy to use graphical user interface.
-- Native installer for Windows, App bundle for MacOS.
-- Hardware-accelerated encoding powered by ffmpeg.
-- Choose between H.264 and H.265 codecs (more can be added later).
-- View basic information about the video, OSD, SRT and font files.
-- Preview OSD frames before rendering.
-- Automatically center the OSD or position it manually.
-- Render selected info from the SRT file.
-- Selectable output video bitrate (more encoder settings will be added later).
-- Upscale output video to 1440p for higher quality when uploading to YouTube.
-- Mask OSD items ([demo](https://imgur.com/u8xi2tX)).
+This is a browser port of the [Walksnail OSD Tool](https://github.com/avsaase/walksnail-osd-tool)
+by [Alexander van Saase](https://github.com/avsaase), the cross-platform desktop application
+for rendering Walksnail OSD and SRT data onto DVR footage. The file parsers, the OSD layout
+rules and the SRT line follow the original so that both tools produce the same picture, and
+the native tool remains the faster option for very long recordings or batch work. Its source
+and build instructions are in this repository too, see [docs/NATIVE_README.md](docs/NATIVE_README.md).
 
-Anything else? Open a feature request [here](https://github.com/avsaase/walksnail-osd-tool/issues/new?assignees=&labels=enhancement&template=feature_request.yaml).
+Authors: Alexander van Saase (original project), Steven L Osborn (web edition and native
+render pipeline work). Licensed under the GPL-3.0, see [LICENSE.md](LICENSE.md).
 
-## Installation
+## Browser support
 
-### Windows
-Download and run the installer from the [latest release](https://github.com/avsaase/walksnail-osd-tool/releases/latest).
+- Preview works in any current browser.
+- Rendering needs WebCodecs: Chrome, Edge and Brave 94+, Safari 16.4+, Firefox 130+. The
+  browser's hardware video codecs are used when it has them.
+- Chrome and Edge ask where to save the output. Brave, Safari and Firefox write it to the
+  page's private storage and offer it as a download when the render finishes.
 
-### MacOS
-Download the app bundle for your processor architecture from the [latest release](https://github.com/avsaase/walksnail-osd-tool/releases/latest) and drag it to your Applications folder.
+## Running it yourself
 
-<details>
-<summary>Instructions for running the first time</summary>
-    
-The MacOS binaries provided by this project are not signed with a "Developer ID Certificate". When you try to run the app for the first time you may get a warning from MacOS that it may be malicious software, the developer cannot be verified, it may be damaged, etc. Close the warning, go to System Settings -> Privacy & Security and click "Open Anyway". This should only be required the first time you open the app.
+The web app lives in [`web/`](web/) and is a static site; any web server can host the
+build output.
 
-If you think this is annoying you can donate some money [here](https://www.buymeacoffee.com/avsaase) so I can pay Apple for a developer account.
-</details>
+```
+cd web
+npm install
+npm run dev      # development server on http://localhost:5173
+npm run build    # production build in web/dist/
+npm test
+```
 
-### Linux
-The project builds on Ubuntu in CI but I don't know enough about packaging for Linux to make release binaries. For now you need to build from source.
-
-### Building from source
-1. Install the [Rust toolchain](https://www.rust-lang.org/tools/install).
-2. Run `cargo install --git https://github.com/avsaase/walksnail-osd-tool.git`. The executable will be installed in `$HOME/.cargo/bin/` and added to your path.
-3. To run the app you need the `ffmpeg` and `ffprobe` binaries in your `path` or placed next to the executable you just build.
-4. Run the app with `walksnail-osd-tool`.
-
-### Similar projects
-- [kirek007/ws-osd-py](https://github.com/kirek007/ws-osd-py): Python-based tool with GUI and CLI. No longer maintained in favor of this project but has a few features that this project currently lacks. Depending on your OS it can require some manual setup due to Python dependencies.
-- [shellixyz/hd_fpv_video_tool](https://github.com/shellixyz/hd_fpv_video_tool): Rust-based CLI tool with support for with Walksnail and DJI. Mainly targets Linux and can be difficult to build from source on Windows and MacOS. Has some cool features like live playback of the DVR with OSD without rendering.
-
-## Disclaimer
-This project is not affiliated with Walksnail/Caddx.
+Fonts offered in the font dropdown are the PNGs in `web/public/osd-fonts/` listed in
+`fonts.json` there. Design notes for the browser version are in
+[docs/WEBGPU_BROWSER_SPEC.md](docs/WEBGPU_BROWSER_SPEC.md); performance notes for the native
+render pipeline are in [PERFORMANCE_NOTES.md](PERFORMANCE_NOTES.md).
