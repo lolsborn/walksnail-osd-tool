@@ -2,6 +2,7 @@ use std::{
     io::{self, Write},
     path::PathBuf,
     thread,
+    time::Instant,
 };
 
 use crossbeam_channel::{Receiver, Sender};
@@ -15,7 +16,7 @@ use super::{render_settings::RenderSettings, Encoder, FromFfmpegMessage, ToFfmpe
 use crate::{
     font,
     osd::{self, OsdOptions},
-    overlay::FrameOverlayIter,
+    overlay::{get_character_size, FrameOverlayIter},
     srt::{self, SrtOptions},
 };
 
@@ -50,6 +51,9 @@ pub fn start_video_render(
     let (from_ffmpeg_tx, from_ffmpeg_rx) = crossbeam_channel::unbounded();
     let (to_ffmpeg_tx, to_ffmpeg_rx) = crossbeam_channel::unbounded();
 
+    // Resize the font to the video's character size once, instead of on every glyph of every frame
+    let font_file = font_file.resized(&get_character_size(video_info.height));
+
     // Iterator over decoded video and OSD frames
     let frame_overlay_iter = FrameOverlayIter::new(
         decoder_process
@@ -77,9 +81,13 @@ pub fn start_video_render(
         .name("Decoder handler".into())
         .spawn(move || {
             tracing::info_span!("Decoder handler thread").in_scope(|| {
-                frame_overlay_iter.for_each(|f| {
-                    encoder_stdin.write_all(&f.data).ok();
-                });
+                let mut frame_overlay_iter = frame_overlay_iter;
+                while let Some(frame) = frame_overlay_iter.next() {
+                    let write_start = Instant::now();
+                    encoder_stdin.write_all(&frame.data).ok();
+                    frame_overlay_iter.record_encoder_write(write_start.elapsed());
+                }
+                frame_overlay_iter.timings().log_summary();
             });
         })
         .expect("Failed to spawn decoder handler thread");

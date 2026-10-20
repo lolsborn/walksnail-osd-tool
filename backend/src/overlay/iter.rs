@@ -1,4 +1,4 @@
-use std::{iter::Peekable, vec::IntoIter};
+use std::{iter::Peekable, time::Instant, vec::IntoIter};
 
 use crossbeam_channel::{Receiver, Sender};
 use ffmpeg_sidecar::{
@@ -8,7 +8,7 @@ use ffmpeg_sidecar::{
 };
 use image::{Rgba, RgbaImage};
 
-use super::{overlay_osd, overlay_srt_data};
+use super::{overlay_osd, overlay_srt_data, RenderTimings};
 use crate::{
     ffmpeg::{handle_decoder_events, FromFfmpegMessage, ToFfmpegMessage},
     font,
@@ -30,6 +30,7 @@ pub struct FrameOverlayIter<'a> {
     ffmpeg_sender: Sender<FromFfmpegMessage>,
     ffmpeg_receiver: Receiver<ToFfmpegMessage>,
     chroma_key: Option<Rgba<u8>>,
+    timings: RenderTimings,
 }
 
 impl<'a> FrameOverlayIter<'a> {
@@ -68,7 +69,19 @@ impl<'a> FrameOverlayIter<'a> {
             ffmpeg_sender,
             ffmpeg_receiver,
             chroma_key,
+            timings: RenderTimings::default(),
         }
+    }
+
+    /// Time spent so far in each stage, as measured on the compositing thread.
+    pub fn timings(&self) -> &RenderTimings {
+        &self.timings
+    }
+
+    /// Add time spent writing a finished frame to the encoder. Called by the thread that drives this iterator,
+    /// since the write happens outside of `next`.
+    pub fn record_encoder_write(&mut self, duration: std::time::Duration) {
+        self.timings.encoder_write += duration;
     }
 }
 
@@ -81,8 +94,14 @@ impl Iterator for FrameOverlayIter<'_> {
             self.decoder_process.quit().unwrap();
         }
 
+        let wait_start = Instant::now();
         self.decoder_iter.find_map(|e| match e {
             FfmpegEvent::OutputFrame(mut video_frame) => {
+                // Everything before this point was spent waiting on the decoder
+                let overlay_start = Instant::now();
+                self.timings.decoder_wait += overlay_start - wait_start;
+                self.timings.frames += 1;
+
                 // For every video frame check if frame time is later than the next OSD frame time.
                 // If so advance the iterator over the OSD frames so we use the correct OSD frame
                 // for this video frame
@@ -112,12 +131,16 @@ impl Iterator for FrameOverlayIter<'_> {
                     &self.font_file,
                     &self.osd_options,
                 );
+                let osd_done = Instant::now();
+                self.timings.osd_overlay += osd_done - overlay_start;
 
                 if let Some(srt_data) = self.current_srt_frame.as_ref().and_then(|f| f.data.as_ref()) {
                     overlay_srt_data(&mut frame_image, srt_data, &self.srt_font, &self.srt_options);
                 }
+                self.timings.srt_overlay += osd_done.elapsed();
 
-                video_frame.data = frame_image.as_raw().to_vec();
+                // Hand the buffer over without copying it
+                video_frame.data = frame_image.into_raw();
                 Some(video_frame)
             }
             other_event => {
