@@ -278,6 +278,9 @@ async function startRender(): Promise<void> {
         const remaining = p.fps > 0 ? (p.frameCount - p.framesDone) / p.fps : 0;
         renderStatus.textContent = `${p.framesDone} / ${p.frameCount} frames, ${p.fps.toFixed(0)} fps, ${formatTime(remaining)} left`;
       },
+      (stage) => {
+        renderStatus.textContent = stage;
+      },
     );
     renderStatus.textContent = `Done: ${outputName}`;
     progressBar.value = 1;

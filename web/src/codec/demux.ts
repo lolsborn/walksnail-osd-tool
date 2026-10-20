@@ -40,6 +40,12 @@ interface BoxLocation {
   type: string;
   start: number;
   size: number;
+  /** 16 when the box uses a 64 bit "largesize" header, otherwise 8. */
+  headerBytes: number;
+}
+
+function mdatHeaderBytes(box: BoxLocation): number {
+  return box.headerBytes;
 }
 
 const CHUNK_BYTES = 8 * 1024 * 1024;
@@ -52,14 +58,16 @@ async function scanTopLevelBoxes(file: File): Promise<BoxLocation[]> {
     const header = new DataView(await file.slice(offset, offset + 16).arrayBuffer());
     let size = header.getUint32(0);
     const type = String.fromCharCode(header.getUint8(4), header.getUint8(5), header.getUint8(6), header.getUint8(7));
+    let headerBytes = 8;
     if (size === 1) {
       // 64 bit "largesize"
       size = Number(header.getBigUint64(8));
+      headerBytes = 16;
     } else if (size === 0) {
       size = file.size - offset; // box extends to the end of the file
     }
     if (size < 8) throw new Error(`Corrupt MP4: box ${type} at ${offset} has size ${size}`);
-    boxes.push({ type, start: offset, size });
+    boxes.push({ type, start: offset, size, headerBytes });
     offset += size;
   }
   return boxes;
@@ -132,10 +140,14 @@ export class Demuxer {
       this.isoFile.onReady = () => resolve();
       this.isoFile.onError = (module, message) => reject(new Error(`${module}: ${message}`));
     });
-    // Feed everything except the media data so the index is parsed first
+    // Feed everything except the media data so the index is parsed first. The parser walks the
+    // file in order and needs each mdat's header to know how far to skip, so those bytes go in too.
     for (const box of this.boxes) {
-      if (box.type === "mdat") continue;
-      await this.appendRange(box.start, box.start + box.size);
+      if (box.type === "mdat") {
+        await this.appendRange(box.start, box.start + mdatHeaderBytes(box));
+      } else {
+        await this.appendRange(box.start, box.start + box.size);
+      }
     }
     await ready;
 
@@ -194,7 +206,8 @@ export class Demuxer {
     for (const box of this.boxes) {
       if (box.type !== "mdat") continue;
       const end = box.start + box.size;
-      for (let offset = box.start; offset < end && !shouldStop(); offset += CHUNK_BYTES) {
+      // The header was already fed with the index; buffers must not overlap
+      for (let offset = box.start + mdatHeaderBytes(box); offset < end && !shouldStop(); offset += CHUNK_BYTES) {
         const chunkEnd = Math.min(offset + CHUNK_BYTES, end);
         const buffer = await this.file.slice(offset, chunkEnd).arrayBuffer();
         this.isoFile.appendBuffer(MP4BoxBuffer.fromArrayBuffer(buffer, offset), chunkEnd >= this.file.size);

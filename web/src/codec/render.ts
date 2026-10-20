@@ -90,13 +90,17 @@ export class Renderer {
     inputs: RenderInputs,
     settings: RenderSettings,
     onProgress: (p: RenderProgress) => void,
+    onStage: (stage: string) => void = () => undefined,
   ): Promise<void> {
+    onStage("Reading the video index...");
     const demuxer = await Demuxer.open(inputs.video);
     const { video } = demuxer.media;
 
+    onStage(`Checking codecs (${video.codec}, ${video.width}x${video.height})...`);
     const decoderSupport = await VideoDecoder.isConfigSupported({ codec: video.codec, description: video.description });
     if (!decoderSupport.supported) throw new Error(`This browser cannot decode ${video.codec} video`);
     const encoderConfig = await pickEncoderConfig(video.width, video.height, video.frameRate, settings.bitrate);
+    onStage(`Rendering with ${encoderConfig.codec} (${encoderConfig.hardwareAcceleration})...`);
 
     const canvas = new OffscreenCanvas(video.width, video.height);
     const ctx = canvas.getContext("2d");
@@ -176,9 +180,15 @@ export class Renderer {
     };
     let framesSubmitted = 0;
 
-    const waitForDecoded = () =>
+    // Wake the drain loop when the decoder takes a chunk as well as when it emits a frame:
+    // hardware decoders consume several chunks before the first frame comes out.
+    decoder.addEventListener("dequeue", () => wake?.());
+    const waitForDecoder = () =>
       new Promise<void>((resolve) => {
-        wake = resolve;
+        wake = () => {
+          wake = undefined;
+          resolve();
+        };
       });
 
     /** Composite everything decoded so far, then wait until the pipeline has room again. */
@@ -190,8 +200,8 @@ export class Renderer {
             await new Promise<void>((resolve) => encoder.addEventListener("dequeue", () => resolve(), { once: true }));
           }
         }
-        if (decoder.decodeQueueSize + decoded.length < MAX_FRAMES_IN_FLIGHT) return;
-        await waitForDecoded();
+        if (decoder.decodeQueueSize < MAX_FRAMES_IN_FLIGHT) return;
+        await waitForDecoder();
       }
     };
 
